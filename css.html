@@ -1,0 +1,302 @@
+<style>
+/* =========================================
+   1. Variables & Theming
+   ========================================= */
+:root {
+  /* Colors */
+  --color-primary: #1a73e8;
+  --color-success: #34a853;
+  --color-warning: #fbbc04;
+  --color-danger: #ea4335;
+  --color-info: #4285f4;
+  
+  --bg-body: #f0f2f5;
+  --bg-card: #ffffff;
+  --bg-modal: #ffffff;
+  --bg-input: #ffffff;
+  
+  --text-main: #3c4043;
+  --text-muted: #6c757d;
+  --text-light: #ffffff;
+  
+  --border-color: #dee2e6;
+  --shadow-sm: 0 .125rem .25rem rgba(0,0,0,.075);
+  
+  /* Category Colors */
+  --cat-intro: #fbbc04;
+  --cat-learn: #4285f4;
+  --cat-deep: #ea4335;
+  --cat-summary: #34a853;
+  --cat-mytask: #9334e6;
+  --bg-mytask: #fbf5ff;
+}
+
+[data-theme="dark"] {
+  --bg-body: #121212;
+  --bg-card: #1e1e1e;
+  --bg-modal: #1e1e1e;
+  --bg-input: #2c2c2c;
+  
+  --text-main: #e0e0e0;
+  --text-muted: #adb5bd;
+  
+  --border-color: #444;
+  --shadow-sm: 0 .125rem .25rem rgba(0,0,0,.5);
+  --bg-mytask: rgba(147, 52, 230, 0.1);
+}
+
+/* =========================================
+   2. Base Styles
+   ========================================= */
+body {
+  font-family: "Zen Maru Gothic", sans-serif;
+  color: var(--text-main);
+  background-color: var(--bg-body);
+  transition: background-color 0.3s ease, color 0.3s ease;
+}
+
+/* Bootstrap Overrides for Theming */
+.bg-light { background-color: var(--bg-body) !important; }
+.bg-white { background-color: var(--bg-card) !important; }
+.text-muted { color: var(--text-muted) !important; }
+.border { border-color: var(--border-color) !important; }
+.modal-content { background-color: var(--bg-modal); color: var(--text-main); }
+.btn-close { filter: var(--btn-close-filter, none); }
+
+[data-theme="dark"] .btn-close { filter: invert(1) grayscale(100%) brightness(200%); }
+[data-theme="dark"] .form-control,
+[data-theme="dark"] .form-select {
+  background-color: var(--bg-input);
+  border-color: var(--border-color);
+  color: var(--text-main);
+}
+[data-theme="dark"] .form-control::placeholder { color: var(--text-muted); }
+
+rt { font-size: 0.65em; color: var(--text-muted); }
+
+/* =========================================
+   3. Components
+   ========================================= */
+
+/* Cards */
+.card {
+  background-color: var(--bg-card);
+  border: none;
+  border-radius: 1rem;
+  box-shadow: var(--shadow-sm);
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+  color: var(--text-main);
+}
+.card-task { border-left: 5px solid transparent; }
+.card-task:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 .5rem 1rem rgba(0,0,0,.15) !important;
+}
+
+/* Card States */
+.card-locked {
+  background-color: rgba(233, 236, 239, 0.5);
+  opacity: 0.7;
+  pointer-events: none;
+  filter: grayscale(0.8);
+}
+
+/* Buttons */
+.btn-rounded { border-radius: 2rem; font-weight: 700; }
+
+/* Badges */
+.badge-cat {
+  font-size: 0.75rem;
+  padding: 0.35em 0.8em;
+  border-radius: 1rem;
+  background-color: var(--border-color);
+  color: var(--text-main);
+}
+/* Stamp Badge */
+.stamp-badge {
+  position: absolute;
+  top: -10px;
+  right: -10px;
+  font-size: 2.2rem;
+  filter: drop-shadow(0 2px 4px rgba(0,0,0,0.3));
+  z-index: 20;
+  pointer-events: none;
+}
+
+/* =========================================
+   4. Layout & Specific Modules
+   ========================================= */
+
+/* Timeline */
+.timeline-container {
+  position: sticky;
+  top: 0;
+  z-index: 1000;
+  background: rgba(255, 255, 255, 0.95);
+  backdrop-filter: blur(5px);
+  border-bottom: 1px solid var(--border-color);
+}
+[data-theme="dark"] .timeline-container {
+  background: rgba(30, 30, 30, 0.95);
+}
+
+.progress-bar-striped {
+  background-image: linear-gradient(45deg,rgba(255,255,255,.15) 25%,transparent 25%,transparent 50%,rgba(255,255,255,.15) 50%,rgba(255,255,255,.15) 75%,transparent 75%,transparent);
+  background-size: 1rem 1rem;
+}
+
+/* Heatmap Table */
+.heatmap-table th, .heatmap-table td {
+  vertical-align: middle;
+  text-align: center;
+}
+.heatmap-table th {
+  background-color: var(--bg-card);
+  color: var(--text-main);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  cursor: pointer;
+  border-bottom: 1px solid var(--border-color);
+  font-size: 0.85rem;
+  transition: background-color 0.2s;
+}
+.heatmap-table th:hover { background-color: var(--border-color); }
+
+.heatmap-cell-wrapper {
+  cursor: pointer;
+  transition: transform 0.1s;
+  padding: 2px;
+}
+.heatmap-cell-wrapper:hover { transform: scale(1.2); }
+
+.heatmap-cell {
+  width: 28px;
+  height: 28px;
+  border-radius: 4px;
+  background-color: var(--border-color);
+  margin: 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1rem;
+}
+
+/* Heatmap Status Colors */
+.heatmap-done { background-color: var(--color-success) !important; color: #fff; }
+.heatmap-doing { background-color: var(--color-warning) !important; color: #000; }
+.heatmap-sos { background-color: var(--color-danger) !important; color: #fff; animation: pulse 2s infinite; }
+.heatmap-focus { background-color: var(--color-info) !important; color: #fff; }
+
+/* Plan Mode (Drag & Drop) */
+.plan-container {
+  display: flex;
+  overflow-x: auto;
+  gap: 15px;
+  padding-bottom: 15px;
+  scroll-behavior: smooth;
+}
+.plan-hour-col {
+  min-width: 260px;
+  background-color: var(--bg-card);
+  border-radius: 12px;
+  padding: 10px;
+  border: 1px solid var(--border-color);
+  display: flex;
+  flex-direction: column;
+}
+.plan-hour-header {
+  font-weight: bold;
+  text-align: center;
+  padding: 8px;
+  border-bottom: 2px solid var(--border-color);
+  margin-bottom: 10px;
+}
+.plan-drop-zone {
+  min-height: 150px;
+  flex-grow: 1;
+  background-color: rgba(0,0,0,0.02);
+  border-radius: 8px;
+}
+[data-theme="dark"] .plan-drop-zone { background-color: rgba(255,255,255,0.05); }
+
+.task-draggable { cursor: grab; }
+.task-draggable:active { cursor: grabbing; }
+
+/* Portfolio Timeline */
+.portfolio-timeline {
+  position: relative;
+  padding-left: 20px;
+  border-left: 2px solid var(--border-color);
+}
+.portfolio-item {
+  position: relative;
+  margin-bottom: 20px;
+}
+.portfolio-item::before {
+  content: '';
+  position: absolute;
+  left: -26px;
+  top: 15px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--bg-card);
+  border: 2px solid var(--color-info);
+}
+
+/* Chart Container */
+.chart-container {
+  position: relative;
+  height: 300px;
+  width: 100%;
+}
+
+/* =========================================
+   5. Modifiers
+   ========================================= */
+.border-cat-intro { border-left-color: var(--cat-intro) !important; }
+.border-cat-learn { border-left-color: var(--cat-learn) !important; }
+.border-cat-deep { border-left-color: var(--cat-deep) !important; }
+.border-cat-summary { border-left-color: var(--cat-summary) !important; }
+.border-cat-mytask { border-left-color: var(--cat-mytask) !important; background-color: var(--bg-mytask); }
+.border-secondary { border-left-color: var(--text-muted) !important; }
+
+.transition-bg { transition: background-color 0.3s ease; }
+
+/* =========================================
+   6. Animations
+   ========================================= */
+@keyframes heartBeat {
+  0% { transform: scale(1); }
+  14% { transform: scale(1.3); }
+  28% { transform: scale(1); }
+  42% { transform: scale(1.3); }
+  70% { transform: scale(1); }
+}
+.animate__heartBeat { animation: heartBeat 1.3s ease-in-out; }
+
+@keyframes flash {
+  from, 50%, to { opacity: 1; }
+  25%, 75% { opacity: 0; }
+}
+.animate__flash { animation: flash 2s infinite; }
+
+@keyframes pulse {
+  from { transform: scale3d(1, 1, 1); }
+  50% { transform: scale3d(1.05, 1.05, 1.05); }
+  to { transform: scale3d(1, 1, 1); }
+}
+.animate__pulse { animation: pulse 2s infinite; }
+
+@keyframes bounceIn {
+  from, 20%, 40%, 60%, 80%, to { animation-timing-function: cubic-bezier(0.215, 0.61, 0.355, 1); }
+  0% { opacity: 0; transform: scale3d(0.3, 0.3, 0.3); }
+  20% { transform: scale3d(1.1, 1.1, 1.1); }
+  40% { transform: scale3d(0.9, 0.9, 0.9); }
+  60% { opacity: 1; transform: scale3d(1.03, 1.03, 1.03); }
+  80% { transform: scale3d(0.97, 0.97, 0.97); }
+  to { opacity: 1; transform: scale3d(1, 1, 1); }
+}
+.animate__bounceIn { animation: bounceIn 0.75s; }
+</style>
