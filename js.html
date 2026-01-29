@@ -1,0 +1,1157 @@
+<script>
+/**
+ * みらいコンパス v12.1 - Client Side Logic (Bug Fix)
+ * 修正: DOM IDの書き換えによる画面遷移エラーの修正
+ */
+
+// ==========================================
+//  1. Global State & Constants
+// ==========================================
+
+// 定数
+const CONSTANTS = {
+  LS_KEY_NAME: 'mirai_student_name',
+  LS_KEY_THEME: 'mirai_theme',
+  UNIT_TIME: 45,
+  REFRESH_INTERVAL: 30000 // 30秒
+};
+
+// アプリケーション状態
+let appState = {
+  mode: typeof INITIAL_MODE !== 'undefined' ? INITIAL_MODE : 'student', // 'student' | 'teacher'
+  user: {
+    isAdmin: false,
+    name: ""
+  },
+  view: {
+    student: 'daily', // 'daily' | 'planning'
+    teacher: 'cards'  // 'cards' | 'heatmap' | 'analysis'
+  },
+  sound: {
+    enabled: true,
+    unlocked: false,
+    prevSosCount: 0
+  },
+  unit: {
+    id: "",
+    totalHours: 8,
+    currentHour: 1
+  }
+};
+
+// データストア (サーバー同期)
+let dataStore = {
+  masterTasks: [],
+  myTasks: [],     // 生徒個人用
+  clsMyTasks: {},  // 先生用（全生徒分）
+  liveStatus: [],
+  clsProgress: {},
+  clsFeedback: {},
+  clsPlans: {},
+  clsReflections: {},
+  studentProgress: {}, // ログイン中の生徒用
+  studentFeedback: {}, // ログイン中の生徒用
+  studentPlan: {},     // ログイン中の生徒用
+  portfolioData: {}    // ログイン中の生徒用
+};
+
+// 一時的な計算用
+let computedState = {
+  todaysPlanIds: new Set()
+};
+
+let autoRefreshTimer = null;
+let ssUrl = "";
+
+
+// ==========================================
+//  2. Initialization & Data Fetching
+// ==========================================
+
+window.onload = function() {
+  // テーマ復元
+  const theme = localStorage.getItem(CONSTANTS.LS_KEY_THEME);
+  if (theme === 'dark') {
+    document.body.setAttribute('data-theme', 'dark');
+    const toggle = document.getElementById('darkModeSwitch');
+    if (toggle) toggle.checked = true;
+  }
+  
+  // 初期データ取得開始
+  google.script.run
+    .withSuccessHandler(handleInitialResponse)
+    .withFailureHandler(handleError)
+    .getAppInitialData();
+};
+
+function handleInitialResponse(res) {
+  if (!res.success) {
+    handleError({ message: res.error });
+    return;
+  }
+  
+  appState.user.isAdmin = res.isAdmin;
+  ssUrl = res.ssUrl;
+
+  // URLパラメータでモード指定がない場合、権限に基づいて自動設定
+  if (appState.mode === 'auto') {
+    appState.mode = appState.user.isAdmin ? 'teacher' : 'student';
+  }
+
+  // スプレッドシートボタンの設定
+  const btnSs = document.getElementById('btn-view-ss');
+  if (btnSs && ssUrl) btnSs.onclick = () => window.open(ssUrl, '_blank');
+  
+  // 先生以外は音設定を隠す
+  if (appState.mode !== 'teacher') {
+    const area = document.getElementById('sound-setting-area');
+    if (area) area.style.display = 'none';
+  }
+
+  if (!res.isInitialized) {
+    renderSetupOverlay();
+  } else {
+    if (appState.mode === 'teacher') startAutoRefresh();
+    loadMainData();
+  }
+}
+
+function startInitialization() {
+  unlockAudio();
+  showLoading();
+  google.script.run
+    .withSuccessHandler(r => {
+      if (r.success) loadMainData();
+      else handleError({ message: r.error });
+    })
+    .initSystem();
+}
+
+function loadMainData() {
+  if (document.getElementById('app-container').innerHTML === '') showLoading();
+  
+  google.script.run
+    .withSuccessHandler(res => {
+      if (res.success) {
+        updateDataStore(res.json);
+        renderApp();
+        hideLoading();
+      } else {
+        handleError({ message: res.error });
+      }
+    })
+    .getData();
+}
+
+function startAutoRefresh() {
+  if (autoRefreshTimer) clearInterval(autoRefreshTimer);
+  autoRefreshTimer = setInterval(() => {
+    google.script.run
+      .withSuccessHandler(res => {
+        if (res.success) {
+          updateDataStore(res.json);
+          if (appState.mode === 'teacher') {
+            // 画面が描画済みの場合のみ更新
+            if (document.getElementById('t-area')) {
+              renderTeacherDashboardContent();
+              checkSosAndPlaySound();
+            }
+          }
+        }
+      })
+      .getData();
+  }, CONSTANTS.REFRESH_INTERVAL);
+}
+
+/**
+ * JSONデータを受け取ってデータストアを更新する
+ */
+function updateDataStore(jsonStr) {
+  const d = JSON.parse(jsonStr);
+  
+  dataStore.masterTasks = d.unit || [];
+  dataStore.liveStatus = d.live || [];
+  dataStore.clsProgress = d.progress || {};
+  dataStore.clsFeedback = d.feedback || {};
+  dataStore.clsMyTasks = d.myTasks || {};
+  dataStore.clsPlans = d.plans || {};
+  dataStore.clsReflections = d.dailyReflections || {};
+
+  // 単元情報の更新
+  if (dataStore.masterTasks.length > 0) {
+    appState.unit.id = dataStore.masterTasks[0].unitId;
+    appState.unit.totalHours = Number(dataStore.masterTasks[0].totalHours) || 8;
+  }
+}
+
+
+// ==========================================
+//  3. Routing & Render Dispatcher
+// ==========================================
+
+function renderApp() {
+  try {
+    // 念のためIDをリセット（以前のバージョンの影響回避）
+    const container = document.getElementById('app-container') || document.getElementById('teacher-view-root');
+    if (container) container.id = 'app-container';
+
+    if (appState.mode === 'teacher') {
+      renderTeacherView();
+    } else {
+      // 児童モード
+      const savedName = localStorage.getItem(CONSTANTS.LS_KEY_NAME);
+      
+      // 自動ログイン判定
+      if (!appState.user.name && savedName) {
+        appState.user.name = savedName;
+        loginStudent(true);
+      } else if (!appState.user.name) {
+        renderNameEntry();
+      } else {
+        // ログイン済みなら計画データを同期して描画
+        syncStudentPlan();
+        renderStudentView();
+      }
+    }
+  } catch (e) {
+    console.error(e);
+    handleError({ message: "描画エラー: " + e.message });
+  }
+}
+
+function switchMode(newMode) {
+  appState.mode = newMode;
+  renderApp();
+}
+
+
+// ==========================================
+//  4. Student Logic (View & Actions)
+// ==========================================
+
+function renderNameEntry() {
+  document.getElementById('app-container').innerHTML = `
+    <div class="row justify-content-center animate__animated animate__fadeIn">
+      <div class="col-md-6">
+        <div class="card shadow-sm p-5 text-center border-0 rounded-4">
+          <h4 class="fw-bold mb-4">名前を教えてね</h4>
+          <input type="text" id="input-name" class="form-control form-control-lg text-center mb-4 rounded-pill border-0" placeholder="例：やまだ たろう">
+          <div class="form-check mb-4 d-inline-block">
+            <input class="form-check-input" type="checkbox" id="rm-me" checked>
+            <label class="form-check-label small" for="rm-me">名前を覚える</label>
+          </div>
+          <button class="btn btn-primary btn-lg w-100 rounded-pill shadow-sm" onclick="handleLoginClick()">はじめる！</button>
+        </div>
+      </div>
+    </div>`;
+}
+
+function handleLoginClick() {
+  const nameInput = document.getElementById('input-name');
+  const remember = document.getElementById('rm-me').checked;
+  const name = nameInput.value.trim();
+  
+  if (!name) return;
+  
+  if (remember) localStorage.setItem(CONSTANTS.LS_KEY_NAME, name);
+  else localStorage.removeItem(CONSTANTS.LS_KEY_NAME);
+  
+  appState.user.name = name;
+  loginStudent(false);
+}
+
+function loginStudent(isAuto) {
+  if (!isAuto) showLoading();
+  
+  google.script.run
+    .withSuccessHandler(res => {
+      if (res.success) {
+        const d = JSON.parse(res.json);
+        // 個人データをストアにセット
+        dataStore.studentProgress = d.progress || {};
+        dataStore.studentFeedback = d.feedback || {};
+        dataStore.myTasks = d.myTasks || [];
+        dataStore.portfolioData = d.portfolio || {};
+        
+        // 計画データ（全体データから抽出する場合もあるが、個人取得APIの結果を優先）
+        if (d.plans && d.plans[appState.unit.id]) {
+           dataStore.clsPlans[appState.user.name] = { [appState.unit.id]: d.plans[appState.unit.id] };
+        }
+        
+        syncStudentPlan();
+        renderStudentView();
+        
+        if (!isAuto) hideLoading();
+      }
+    })
+    .getStudentProgress(appState.user.name);
+}
+
+function logoutStudent() {
+  localStorage.removeItem(CONSTANTS.LS_KEY_NAME);
+  appState.user.name = "";
+  renderNameEntry();
+}
+
+/**
+ * 計画データの同期（配列初期化など）
+ */
+function syncStudentPlan() {
+  const plans = dataStore.clsPlans[appState.user.name] || {};
+  const currentPlan = plans[appState.unit.id] || {};
+  
+  // 未定義の時間は空配列で初期化
+  for (let i = 1; i <= appState.unit.totalHours; i++) {
+    const k = String(i);
+    if (!currentPlan[k]) currentPlan[k] = [];
+  }
+  
+  dataStore.studentPlan = currentPlan;
+}
+
+/**
+ * 児童画面の描画（モード分岐）
+ */
+function renderStudentView() {
+  if (appState.view.student === 'planning') {
+    renderStudentPlanning();
+  } else {
+    renderStudentDaily();
+  }
+}
+
+/**
+ * 児童：本時の学習画面（Daily View）
+ */
+function renderStudentDaily() {
+  const myStat = dataStore.liveStatus.find(d => d.name === appState.user.name) || { mode: '通常' };
+  const allTasks = [...dataStore.masterTasks, ...dataStore.myTasks];
+  
+  // 今日のタスクID集合を構築
+  computedState.todaysPlanIds = new Set();
+  const hourKey = String(appState.unit.currentHour);
+  const plannedIds = dataStore.studentPlan[hourKey] || [];
+  
+  plannedIds.forEach(tid => computedState.todaysPlanIds.add(tid));
+  
+  // 先生主導タスクは強制追加
+  allTasks.forEach(t => {
+    if (t.format === 'teacher') computedState.todaysPlanIds.add(t.taskId);
+  });
+  
+  // 表示タスクフィルタリング
+  const todaysTasks = allTasks.filter(t => computedState.todaysPlanIds.has(t.taskId));
+  
+  // 時間計算
+  let totalTime = 0;
+  todaysTasks.forEach(t => totalTime += t.time);
+  const timePercent = Math.min((totalTime / CONSTANTS.UNIT_TIME) * 100, 100);
+  let timeColor = totalTime > CONSTANTS.UNIT_TIME ? 'bg-danger' : (totalTime > CONSTANTS.UNIT_TIME * 0.8 ? 'bg-warning' : 'bg-success');
+
+  // タスクリストHTML生成
+  let taskListHtml = '';
+  if (todaysTasks.length === 0) {
+    taskListHtml = `
+      <div class="text-center py-5 text-muted">
+        <p>この時間の計画はありません。</p>
+        <button class="btn btn-outline-primary rounded-pill" onclick="setStudentViewMode('planning')">計画を立てる</button>
+      </div>`;
+  } else {
+    taskListHtml = todaysTasks.map(t => createStudentTaskCard(t)).join('');
+  }
+
+  // 時間選択肢
+  let hourOptions = '';
+  for(let i = 1; i <= appState.unit.totalHours; i++) {
+    hourOptions += `<option value="${i}" ${i === appState.unit.currentHour ? 'selected' : ''}>第${i}時</option>`;
+  }
+
+  // 振り返りボタン状態
+  const refData = (dataStore.clsReflections[appState.user.name] && 
+                   dataStore.clsReflections[appState.user.name][appState.unit.id] && 
+                   dataStore.clsReflections[appState.user.name][appState.unit.id][appState.unit.currentHour]) || {};
+  const refBtnClass = refData.achievement ? 'btn-success' : 'btn-outline-success';
+
+  // ステータスバッジ
+  let stBadge = '';
+  let rstBtn = 'd-none';
+  if (myStat.mode === 'たすけて') { 
+    stBadge = `<span class="badge bg-danger rounded-pill px-2 py-1 me-2 animate__animated animate__flash">SOS</span>`; 
+    rstBtn = ''; 
+  } else if (myStat.mode === 'しゅうちゅう') { 
+    stBadge = `<span class="badge bg-info text-white rounded-pill px-2 py-1 me-2 animate__animated animate__pulse">集中</span>`; 
+    rstBtn = ''; 
+  }
+
+  document.getElementById('app-container').innerHTML = `
+    <div class="timeline-container shadow-sm p-3 mb-3 rounded-bottom border-bottom">
+      <div class="d-flex justify-content-between align-items-center mb-2">
+        <select class="form-select form-select-sm w-auto fw-bold text-primary border-0 bg-transparent" onchange="changeCurrentHour(this.value)">${hourOptions}</select>
+        <div class="small fw-bold ${totalTime > CONSTANTS.UNIT_TIME ? 'text-danger' : 'text-muted'}">${totalTime} / ${CONSTANTS.UNIT_TIME}分</div>
+      </div>
+      <div class="progress" style="height: 1.5rem;">
+        <div class="progress-bar progress-bar-striped ${timeColor}" role="progressbar" style="width: ${timePercent}%"></div>
+      </div>
+    </div>
+    
+    <div class="px-2">
+      <div class="d-flex justify-content-between align-items-center mb-3">
+        <div class="fw-bold text-primary me-2 text-truncate" style="max-width:150px;"><i class="bi bi-person-circle me-1"></i>${appState.user.name}</div>
+        <div class="d-flex gap-2">
+          <button class="btn btn-outline-primary btn-sm rounded-pill" onclick="setStudentViewMode('planning')"><i class="bi bi-calendar-range"></i> 計画</button>
+          <button class="btn ${refBtnClass} btn-sm rounded-pill" onclick="openDailyReflectionModal()"><i class="bi bi-pencil-square"></i> ふりかえり</button>
+        </div>
+      </div>
+      
+      <div class="d-flex justify-content-end align-items-center mb-2">
+        ${stBadge}
+        <div class="d-flex gap-1">
+          <button class="btn btn-danger btn-sm rounded-pill px-3" onclick="submitUserStatus('たすけて')">SOS</button>
+          <button class="btn btn-info btn-sm rounded-pill px-3 text-white" onclick="submitUserStatus('しゅうちゅう')">集中</button>
+          <button class="btn btn-secondary btn-sm rounded-pill px-3 ${rstBtn}" onclick="submitUserStatus('通常')">解除</button>
+        </div>
+      </div>
+      
+      ${taskListHtml}
+      
+      <div class="d-grid gap-2 mb-4 mt-3">
+        <button class="btn btn-outline-primary border-2 border-dashed py-3 rounded-4" onclick="openMyTaskModal()">
+          <i class="bi bi-plus-circle-fill me-2"></i>じぶんの課題をつくる
+        </button>
+      </div>
+    </div>
+    <div class="pb-5"></div>`;
+}
+
+function createStudentTaskCard(t) {
+  const prog = dataStore.studentProgress[t.taskId] || {};
+  const stamp = dataStore.studentFeedback[t.taskId];
+  const isDone = prog.status === '完了';
+  const isDoing = prog.status === '途中';
+  
+  // ロック判定
+  let isLocked = false;
+  if (t.prerequisites && t.prerequisites.length > 0) {
+    const allPreDone = t.prerequisites.every(pid => {
+      const pStat = dataStore.studentProgress[pid];
+      return pStat && pStat.status === '完了';
+    });
+    if (!allPreDone) isLocked = true;
+  }
+
+  const cardClass = isLocked ? 'card-locked' : '';
+  
+  // スタンプ
+  let stampHtml = '';
+  if (stamp) {
+    const icon = {'check':'✅','good':'👍','great':'💮','support':'🚩'}[stamp] || '';
+    stampHtml = `<div class="stamp-badge animate__animated animate__bounceIn">${icon}</div>`;
+  }
+
+  // ボタン
+  let actionBtn = '';
+  if (isDone) {
+    actionBtn = `<button class="btn btn-secondary rounded-pill px-3 btn-sm fw-bold" disabled>完了</button>`;
+  } else {
+    // 計画に入っているので実行ボタン
+    const doingBtn = isDoing ? 'btn-warning text-dark' : 'btn-outline-warning text-dark';
+    let buttons = `<button class="btn btn-outline-success rounded-pill px-3 btn-sm fw-bold" onclick="event.stopPropagation(); submitTaskProgress('${t.taskId}','完了',this)">できた</button>`;
+    
+    if (t.format !== 'teacher') {
+      buttons = `<button class="btn ${doingBtn} rounded-pill px-3 btn-sm fw-bold me-1" onclick="event.stopPropagation(); submitTaskProgress('${t.taskId}','途中',this)">途中</button>` + buttons;
+    }
+    actionBtn = buttons;
+  }
+
+  if (t.format === 'teacher') {
+    actionBtn = `<span class="badge bg-info text-white me-2"><i class="bi bi-person-video3"></i> 先生</span>` + actionBtn;
+  }
+  
+  // リソースアイコン
+  let resHtml = '';
+  if (t.textbook) resHtml += `<span class="badge bg-light text-dark border me-1"><i class="bi bi-book-half text-primary"></i> ${t.textbook}</span>`;
+  if (t.tablet) resHtml += `<span class="badge bg-light text-dark border me-1"><i class="bi bi-tablet-landscape text-success"></i> ${t.tablet}</span>`;
+  if (t.print) resHtml += `<span class="badge bg-light text-dark border me-1"><i class="bi bi-file-earmark-text text-danger"></i> ${t.print}</span>`;
+
+  // メモありアイコン
+  const hasMemo = prog.reflection && prog.reflection.length > 0;
+
+  return `
+    <div class="card shadow-sm mb-3 card-task ${cardClass} position-relative" style="cursor:pointer;" onclick="openTaskDetailModal('${t.taskId}')">
+      ${stampHtml}
+      ${isLocked ? `<div class="position-absolute top-50 start-50 translate-middle text-center" style="z-index:2"><i class="bi bi-lock-fill fs-1 text-secondary"></i><br><span class="badge bg-secondary">まだ選べません</span></div>` : ''}
+      <div class="card-body">
+        <div class="d-flex justify-content-between align-items-center mb-2">
+           <div class="d-flex align-items-center">
+             <span class="badge bg-light text-dark border me-2">${t.category}</span>
+             ${resHtml}
+             ${hasMemo ? '<i class="bi bi-pencil-fill text-warning ms-2"></i>' : ''}
+           </div>
+           <div class="text-end"><span class="badge bg-light text-secondary border">${t.time}分</span></div>
+        </div>
+        <h5 class="fw-bold mb-2">${t.title}</h5>
+        <div class="text-end mt-2 d-flex justify-content-end align-items-center">${actionBtn}</div>
+      </div>
+    </div>`;
+}
+
+/**
+ * 児童：単元計画画面（Planning View）
+ */
+function renderStudentPlanning() {
+  // スクロール位置維持用
+  const planContainer = document.querySelector('.plan-container');
+  const scrollX = planContainer ? planContainer.scrollLeft : 0;
+  const poolContainer = document.getElementById('task-pool-container'); 
+  const poolScrollY = poolContainer ? poolContainer.scrollTop : 0;
+
+  const allTasks = [...dataStore.masterTasks, ...dataStore.myTasks].filter(t => t.format !== 'teacher');
+  
+  // タスクプール（ドラッグ元）
+  let taskPoolHtml = `
+    <div class="d-grid gap-2 mb-3 sticky-top bg-white pt-2 pb-2 border-bottom" style="top:0; z-index:5;">
+      <button class="btn btn-outline-primary btn-sm rounded-pill border-dashed" onclick="openMyTaskModal()">
+        <i class="bi bi-plus-lg me-1"></i>課題作成
+      </button>
+    </div>`;
+  
+  allTasks.forEach(t => {
+    const isMyTask = t.category === 'マイタスク';
+    const bgStyle = isMyTask ? 'background-color:#fbf5ff;' : '';
+    taskPoolHtml += `<div class="card p-2 mb-2 shadow-sm task-draggable" style="${bgStyle}" data-id="${t.taskId}"><div class="small fw-bold">${t.title}</div><div class="x-small text-muted">${t.time}分</div></div>`;
+  });
+
+  // 各時間のドロップゾーン
+  let hoursHtml = '';
+  for(let i = 1; i <= appState.unit.totalHours; i++) {
+    const k = String(i);
+    let plannedTasksHtml = '';
+    const plannedIds = dataStore.studentPlan[k] || [];
+    
+    plannedIds.forEach(tid => {
+      const t = allTasks.find(x => x.taskId === tid);
+      if (t) {
+         const isMyTask = t.category === 'マイタスク';
+         const bgStyle = isMyTask ? 'background-color:#fbf5ff;' : '';
+         plannedTasksHtml += `
+           <div class="card p-2 mb-2 shadow-sm task-draggable" style="${bgStyle}" data-id="${t.taskId}">
+             <div class="d-flex justify-content-between">
+               <span class="small fw-bold text-truncate">${t.title}</span>
+               <i class="bi bi-x text-danger" style="cursor:pointer" onclick="removeFromPlan('${k}', '${tid}')"></i>
+             </div>
+           </div>`;
+      }
+    });
+
+    hoursHtml += `
+      <div class="plan-hour-col">
+        <div class="plan-hour-header">第${i}時</div>
+        <div class="plan-drop-zone" data-hour="${i}">${plannedTasksHtml}</div>
+      </div>`;
+  }
+
+  document.getElementById('app-container').innerHTML = `
+    <div class="p-3 d-flex flex-column h-100">
+      <div class="d-flex justify-content-between align-items-center mb-3 flex-shrink-0">
+        <h5 class="fw-bold m-0"><i class="bi bi-calendar-range me-2 text-primary"></i>単元計画を立てる</h5>
+        <button class="btn btn-primary rounded-pill px-4 shadow-sm" onclick="setStudentViewMode('daily')">
+          <i class="bi bi-check-lg me-1"></i>完了して戻る
+        </button>
+      </div>
+      <div class="row flex-grow-1" style="min-height:0; height: calc(100vh - 150px);">
+        <div class="col-3 h-100 border-end bg-white rounded-start d-flex flex-column">
+          <div class="small text-muted mb-2 flex-shrink-0 p-2 border-bottom">課題リスト</div>
+          <div id="task-pool-container" class="flex-grow-1 overflow-auto p-2">
+            <div id="task-pool">${taskPoolHtml}</div>
+          </div>
+        </div>
+        <div class="col-9 h-100 overflow-hidden">
+          <div class="plan-container h-100 align-items-start pt-2">${hoursHtml}</div>
+        </div>
+      </div>
+    </div>`;
+
+  // スクロール復元
+  const newPlanContainer = document.querySelector('.plan-container');
+  if (newPlanContainer) newPlanContainer.scrollLeft = scrollX;
+  const newPoolContainer = document.getElementById('task-pool-container');
+  if (newPoolContainer) newPoolContainer.scrollTop = poolScrollY;
+
+  // Sortable.js 設定
+  new Sortable(document.getElementById('task-pool'), {
+    group: { name: 'shared', pull: 'clone', put: false },
+    sort: false, animation: 150
+  });
+  
+  document.querySelectorAll('.plan-drop-zone').forEach(el => {
+    new Sortable(el, {
+      group: 'shared', sort: true, animation: 150,
+      onAdd: function (evt) {
+        const tid = evt.item.getAttribute('data-id');
+        const h = String(evt.to.getAttribute('data-hour'));
+        addToPlan(h, tid);
+        evt.item.remove(); // クローン元のDOMは不要なので削除（再描画で整える）
+      }
+    });
+  });
+}
+
+// --- 児童アクション ---
+
+function setStudentViewMode(mode) {
+  appState.view.student = mode;
+  renderStudentView();
+}
+
+function changeCurrentHour(h) {
+  appState.unit.currentHour = parseInt(h);
+  renderStudentView();
+}
+
+function addToPlan(hour, taskId) {
+  const k = String(hour);
+  if (!dataStore.studentPlan[k]) dataStore.studentPlan[k] = [];
+  dataStore.studentPlan[k].push(taskId);
+  savePlan();
+  renderStudentPlanning();
+}
+
+function removeFromPlan(hour, taskId) {
+  const k = String(hour);
+  if (dataStore.studentPlan[k]) {
+    dataStore.studentPlan[k] = dataStore.studentPlan[k].filter(id => id !== taskId);
+    savePlan();
+    renderStudentPlanning();
+  }
+}
+
+function savePlan() {
+  google.script.run
+    .withFailureHandler(handleError)
+    .saveStudentPlan(appState.user.name, appState.unit.id, dataStore.studentPlan);
+}
+
+function togglePlan(taskId) {
+  // ショートカット: 現在の時間の計画に追加/削除
+  const k = String(appState.unit.currentHour);
+  if (!dataStore.studentPlan[k]) dataStore.studentPlan[k] = [];
+  
+  if (computedState.todaysPlanIds.has(taskId)) {
+    dataStore.studentPlan[k] = dataStore.studentPlan[k].filter(id => id !== taskId);
+  } else {
+    dataStore.studentPlan[k].push(taskId);
+  }
+  savePlan();
+  renderStudentView();
+}
+
+function submitTaskProgress(taskId, status, btnElement) {
+  // 楽観的更新
+  if (status === '完了') {
+    btnElement.className = "btn btn-secondary rounded-pill px-4 btn-sm fw-bold animate__animated animate__heartBeat";
+    btnElement.innerHTML = `<i class="bi bi-check-circle-fill me-1"></i>完了`; 
+    btnElement.disabled = true;
+  }
+  
+  if (!dataStore.studentProgress[taskId]) dataStore.studentProgress[taskId] = {};
+  dataStore.studentProgress[taskId].status = status;
+  
+  const allTasks = [...dataStore.masterTasks, ...dataStore.myTasks];
+  const t = allTasks.find(x => x.taskId === taskId);
+  const mem = dataStore.studentProgress[taskId].reflection || "";
+  
+  google.script.run
+    .withFailureHandler(err => console.error(err))
+    .updateStatus(appState.user.name, t.taskId, t.title, status, '通常', mem);
+  
+  if (status === '途中') showToast('info', '途中経過を保存しました');
+  if (status === '完了') setTimeout(renderStudentView, 1000); // ロック解除反映
+}
+
+function submitUserStatus(mode) {
+  // 楽観的更新
+  const idx = dataStore.liveStatus.findIndex(d => d.name === appState.user.name);
+  if (idx >= 0) dataStore.liveStatus[idx].mode = (mode === '通常' ? '' : mode);
+  else dataStore.liveStatus.push({ name: appState.user.name, mode: mode });
+  
+  renderStudentView();
+  
+  let msg = "ステータスを解除しました";
+  let icon = "success";
+  if (mode === 'たすけて') { msg = "SOSを送信しました！"; icon = "warning"; }
+  else if (mode === 'しゅうちゅう') { msg = "集中モードを開始！"; icon = "info"; }
+  
+  showToast(icon, msg);
+  
+  google.script.run
+    .withFailureHandler(err => console.error(err))
+    .updateStatus(appState.user.name, 'st_upd', 'ステータス', '更新', mode, '');
+}
+
+
+// --- モーダル制御 (児童) ---
+
+function openTaskDetailModal(taskId) {
+  const allTasks = [...dataStore.masterTasks, ...dataStore.myTasks];
+  const t = allTasks.find(x => x.taskId === taskId);
+  if (!t || t.isLocked) return;
+  
+  const mem = (dataStore.studentProgress[taskId] || {}).reflection || "";
+  
+  Swal.fire({
+    title: t.title,
+    html: `
+      <div class="text-start">
+        <p class="small bg-light p-2 rounded">${t.desc || ""}</p>
+        <label class="form-label fw-bold small">ふりかえりメモ</label>
+        <textarea id="ref-txt" class="form-control" rows="3">${mem}</textarea>
+      </div>`,
+    showCancelButton: true, confirmButtonText: '保存'
+  }).then(r => {
+    if (r.isConfirmed) {
+      const txt = document.getElementById('ref-txt').value;
+      if (txt !== mem) {
+        if (!dataStore.studentProgress[taskId]) dataStore.studentProgress[taskId] = {};
+        dataStore.studentProgress[taskId].reflection = txt;
+        // ステータスを維持して保存
+        const curStatus = dataStore.studentProgress[taskId].status || '未着手';
+        
+        google.script.run.updateStatus(appState.user.name, t.taskId, t.title, curStatus, '通常', txt);
+        showToast('success', 'メモを保存しました');
+        renderStudentView();
+      }
+    }
+  });
+}
+
+function openDailyReflectionModal() {
+  let ref = { achievement: 'A', comment: '' };
+  if (dataStore.clsReflections && 
+      dataStore.clsReflections[appState.user.name] && 
+      dataStore.clsReflections[appState.user.name][appState.unit.id] && 
+      dataStore.clsReflections[appState.user.name][appState.unit.id][appState.unit.currentHour]) {
+        ref = dataStore.clsReflections[appState.user.name][appState.unit.id][appState.unit.currentHour];
+  }
+
+  Swal.fire({
+    title: `第${appState.unit.currentHour}時のふりかえり`,
+    html: `
+      <div class="text-start">
+        <label class="form-label small fw-bold">達成度</label>
+        <select id="rf-ach" class="form-select mb-3">
+          <option value="A" ${ref.achievement==='A'?'selected':''}>◎ 計画通りできた</option>
+          <option value="B" ${ref.achievement==='B'?'selected':''}>〇 まあまあできた</option>
+          <option value="C" ${ref.achievement==='C'?'selected':''}>△ あまりできなかった</option>
+        </select>
+        <label class="form-label small fw-bold">ひとこと・次回に向けて</label>
+        <textarea id="rf-com" class="form-control" rows="3">${ref.comment||''}</textarea>
+      </div>`,
+    showCancelButton: true, confirmButtonText: '提出'
+  }).then(r => {
+    if (r.isConfirmed) {
+      const a = document.getElementById('rf-ach').value;
+      const c = document.getElementById('rf-com').value;
+      
+      // ローカル更新
+      if(!dataStore.clsReflections[appState.user.name]) dataStore.clsReflections[appState.user.name] = {};
+      if(!dataStore.clsReflections[appState.user.name][appState.unit.id]) dataStore.clsReflections[appState.user.name][appState.unit.id] = {};
+      dataStore.clsReflections[appState.user.name][appState.unit.id][appState.unit.currentHour] = {achievement:a, comment:c};
+
+      google.script.run.saveDailyReflection(appState.user.name, appState.unit.id, appState.unit.currentHour, a, c);
+      showToast('success', '提出しました');
+      renderStudentView();
+    }
+  });
+}
+
+function openMyTaskModal() {
+  Swal.fire({
+    title: 'じぶんの課題をつくる',
+    html: `
+      <div class="text-start">
+        <label class="form-label small fw-bold">タイトル</label>
+        <input id="mt-title" class="form-control mb-3" placeholder="例：図書室で本を調べる">
+        <label class="form-label small fw-bold">やること・めあて</label>
+        <textarea id="mt-desc" class="form-control mb-3" rows="2"></textarea>
+        <label class="form-label small fw-bold">かかる時間（分）</label>
+        <input id="mt-time" type="number" class="form-control" value="15">
+      </div>`,
+    showCancelButton: true, confirmButtonText: '追加する', cancelButtonText: 'やめる',
+    preConfirm: () => {
+      const t = document.getElementById('mt-title').value;
+      if (!t) Swal.showValidationMessage('タイトルを入れてね');
+      return { title: t, desc: document.getElementById('mt-desc').value, time: document.getElementById('mt-time').value };
+    }
+  }).then(r => {
+    if (r.isConfirmed) {
+      const v = r.value;
+      google.script.run.withSuccessHandler(() => {
+        const newId = "MT_TEMP_" + Date.now();
+        dataStore.myTasks.push({ taskId: newId, title: v.title, desc: v.desc, time: parseInt(v.time), category: 'マイタスク', type: 'challenge', format: 'student' });
+        
+        if (appState.view.student === 'planning') {
+          renderStudentPlanning();
+        } else {
+          loginStudent(true); // リロードして同期
+        }
+        showToast('success', '課題を追加しました');
+      }).addMyTask(appState.user.name, v.title, v.desc, v.time, appState.unit.id);
+    }
+  });
+}
+
+function openPortfolio() {
+  const allTasks = [...dataStore.masterTasks, ...dataStore.myTasks];
+  const doneTasks = allTasks.filter(t => { 
+    const p = dataStore.studentProgress[t.taskId]; 
+    return p && p.status === '完了'; 
+  });
+
+  let historyHtml = '<div class="portfolio-timeline mt-3">';
+  if (doneTasks.length === 0) historyHtml += '<p class="text-muted small">まだ完了した課題はありません。</p>';
+  
+  doneTasks.forEach(t => {
+    const p = dataStore.studentProgress[t.taskId];
+    const s = dataStore.studentFeedback[t.taskId];
+    let stampHtml = '';
+    if (s) stampHtml = `<span class="fs-4 ms-2">${{'check':'✅','good':'👍','great':'💮','support':'🚩'}[s]}</span>`;
+    
+    historyHtml += `
+      <div class="portfolio-item">
+        <div class="card shadow-sm border-0 bg-light">
+          <div class="card-body p-3">
+            <div class="d-flex justify-content-between">
+              <h6 class="fw-bold mb-1">${t.title} ${stampHtml}</h6>
+              <span class="badge bg-secondary align-self-start">${t.category}</span>
+            </div>
+            ${p.reflection ? `<div class="small text-muted mt-2 border-top pt-2"><i class="bi bi-chat-quote-fill me-1"></i>${p.reflection}</div>` : ''}
+          </div>
+        </div>
+      </div>`;
+  });
+  historyHtml += '</div>';
+
+  Swal.fire({
+    title: 'ふりかえりポートフォリオ',
+    html: `
+      <div class="text-start" style="max-height: 60vh; overflow-y: auto;">
+        <div class="alert alert-info border-0 d-flex align-items-center">
+          <i class="bi bi-trophy-fill fs-3 me-3 text-warning"></i>
+          <div>
+            <div class="fw-bold">完了タスク: ${doneTasks.length} / ${allTasks.length}</div>
+            <div class="small">獲得スタンプ: ${Object.keys(dataStore.studentFeedback).length}個</div>
+          </div>
+        </div>
+        <h6 class="fw-bold text-muted border-bottom pb-2">学習のあしあと</h6>
+        ${historyHtml}
+        <hr>
+        <label class="form-label fw-bold">学習全体のふりかえり</label>
+        <textarea id="pf-summary" class="form-control" rows="4" placeholder="この単元を通して、できるようになったことや、もっと知りたいことは？">${dataStore.portfolioData.summary||""}</textarea>
+      </div>`,
+    width: '600px',
+    showCancelButton: true, confirmButtonText: '保存して閉じる', cancelButtonText: '閉じる',
+    customClass: { confirmButton: 'rounded-pill', cancelButton: 'rounded-pill' }
+  }).then(r => {
+    if (r.isConfirmed) {
+      const summary = document.getElementById('pf-summary').value;
+      if (summary !== (dataStore.portfolioData.summary||"")) {
+        dataStore.portfolioData.summary = summary;
+        google.script.run.savePortfolio(appState.user.name, summary);
+        showToast('success', '保存しました');
+      }
+    }
+  });
+}
+
+
+// ==========================================
+//  5. Teacher Logic (View & Actions)
+// ==========================================
+
+function renderTeacherView() {
+  const container = document.getElementById('app-container');
+  // 先生モードの基本レイアウト
+  container.innerHTML = `
+    <div class="card shadow-sm p-4 border-0 rounded-4">
+      <div class="d-flex justify-content-between align-items-center mb-4">
+        <h5 class="fw-bold m-0 text-primary">
+          <i class="bi bi-speedometer2 me-2"></i>モニター 
+          <span class="badge bg-success ms-2 small" style="font-size:0.6rem">AUTO</span>
+        </h5>
+        <div class="d-flex gap-3 align-items-center">
+          <div class="btn-group shadow-sm rounded-pill" role="group">
+            <button type="button" class="btn btn-sm ${appState.view.teacher === 'cards' ? 'btn-primary' : 'btn-outline-primary'}" onclick="setTeacherView('cards')">LIVE</button>
+            <button type="button" class="btn btn-sm ${appState.view.teacher === 'heatmap' ? 'btn-primary' : 'btn-outline-primary'}" onclick="setTeacherView('heatmap')">一覧</button>
+            <button type="button" class="btn btn-sm ${appState.view.teacher === 'analysis' ? 'btn-primary' : 'btn-outline-primary'}" onclick="setTeacherView('analysis')">分析</button>
+          </div>
+          <button class="btn btn-primary btn-sm rounded-pill px-3 shadow-sm" onclick="openImportModal()">インポート</button>
+        </div>
+      </div>
+      <div id="t-area"></div>
+    </div>`;
+  renderTeacherDashboardContent();
+}
+
+function setTeacherView(mode) {
+  appState.view.teacher = mode;
+  // 枠ごと再描画
+  renderTeacherView();
+}
+
+function renderTeacherDashboardContent() {
+  const el = document.getElementById('t-area');
+  if (!el) return;
+  
+  // Analysis View
+  if (appState.view.teacher === 'analysis') {
+    renderAnalysisView(el);
+    return;
+  }
+  
+  // Cards View
+  if (appState.view.teacher === 'cards') {
+    renderLiveCards(el);
+    return;
+  }
+  
+  // Heatmap View
+  renderHeatmap(el);
+}
+
+function renderLiveCards(container) {
+  if (dataStore.liveStatus.length === 0) {
+    container.innerHTML = `<div class="text-muted p-5 text-center">待機中...</div>`;
+  } else {
+    container.innerHTML = `<div class="row row-cols-2 row-cols-md-4 row-cols-lg-5 g-3">${dataStore.liveStatus.map(s => `
+      <div class="col"><div class="card h-100 text-center p-3 shadow-sm border-0 rounded-4 ${s.mode==='たすけて'?'sos-alert':''}"><div class="fw-bold text-truncate mb-2">${s.name}</div><i class="bi bi-person-circle fs-1 my-2 ${s.mode==='たすけて'?'text-danger':s.mode==='しゅうちゅう'?'text-info':'text-secondary'}"></i><div class="small text-muted text-truncate">${s.task||'-'}</div><div class="badge bg-light text-muted mt-1 fw-normal">${s.mode}</div></div></div>`).join('')}</div>`;
+  }
+}
+
+function renderHeatmap(container) {
+  if (dataStore.masterTasks.length === 0) { container.innerHTML = `<div class="text-center p-5">課題データなし</div>`; return; }
+  
+  const students = Array.from(new Set([...dataStore.liveStatus.map(d => d.name), ...Object.keys(dataStore.clsProgress)])).sort();
+  if (students.length === 0) { container.innerHTML = `<div class="text-center p-5">生徒データなし</div>`; return; }
+
+  let h = `<div class="table-responsive mb-4"><table class="table table-borderless heatmap-table"><thead><tr><th style="min-width:100px;text-align:left">名前</th>${dataStore.masterTasks.map((t, i) => `<th title="${t.title}" onclick="showTeacherTaskDetailSimple('${t.taskId}')">${t.step ? t.step.replace(/[^0-9]/g, '') : i + 1}</th>`).join('')}</tr></thead><tbody>`;
+  
+  students.forEach(n => {
+    const st = dataStore.liveStatus.find(d => d.name === n);
+    const ic = (st && st.mode === 'たすけて') ? '<i class="bi bi-exclamation-circle-fill text-danger ms-1 animate__animated animate__flash"></i>' : (st && st.mode === 'しゅうちゅう' ? '<i class="bi bi-lightning-fill text-info ms-1"></i>' : '');
+    h += `<tr><td class="text-start fw-bold text-truncate" style="max-width:120px;cursor:pointer;text-decoration:underline" onclick="showStudentAllData('${n}')">${n}${ic}</td>`;
+    
+    const doneList = dataStore.clsProgress[n] || {};
+    const feedbackList = dataStore.clsFeedback[n] || {};
+
+    dataStore.masterTasks.forEach(t => {
+      const p = doneList[t.taskId] || {};
+      const stamp = feedbackList[t.taskId];
+      let cls = "";
+      let icon = "";
+      
+      if (p.status === '完了') cls = "heatmap-done";
+      else if (p.status === '途中') cls = "heatmap-doing";
+      else if (st && st.mode === 'たすけて') cls = "heatmap-sos";
+      
+      if (stamp) {
+        if(stamp==='check') icon='✅'; if(stamp==='good') icon='👍'; if(stamp==='great') icon='💮'; if(stamp==='support') icon='🚩';
+      }
+
+      h += `<td><div class="heatmap-cell-wrapper" onclick="showStudentTaskDetail('${n}', '${t.taskId}')"><div class="heatmap-cell ${cls}" title="${t.title}">${icon}</div></div></td>`;
+    });
+    h += '</tr>';
+  });
+  
+  const indexHtml = `<div class="card bg-light border-0 rounded-4 p-3 mt-3"><h6 class="fw-bold text-muted mb-2"><i class="bi bi-list-ol me-2"></i>課題インデックス</h6><div class="row row-cols-1 row-cols-md-2 g-2 small">${dataStore.masterTasks.map((t, i) => `<div class="col" style="cursor:pointer" onclick="showTeacherTaskDetailSimple('${t.taskId}')"><span class="badge bg-secondary me-2" style="width:25px;">${t.step ? t.step.replace(/[^0-9]/g, '') : i + 1}</span><span class="badge bg-white text-dark border me-1">${t.category}</span><span class="text-truncate d-inline-block" style="max-width:200px;vertical-align:middle">${t.title}</span></div>`).join('')}</div></div>`;
+  container.innerHTML = h + '</tbody></table></div>' + indexHtml;
+}
+
+function renderAnalysisView(container) {
+  // 分析データは別途取得
+  google.script.run.withSuccessHandler(res => {
+    const d = JSON.parse(res.json);
+    const labels = d.tasks.map(t => t.title.substring(0, 10) + "...");
+    const counts = d.tasks.map(t => d.counts[t.id] || 0);
+    
+    container.innerHTML = `
+      <div class="row">
+        <div class="col-md-8">
+          <h6 class="fw-bold text-muted">完了数</h6>
+          <div class="chart-container"><canvas id="completionChart"></canvas></div>
+        </div>
+        <div class="col-md-4">
+          <div class="card bg-light border-0 p-3 h-100">
+            <h6 class="fw-bold text-muted">データ管理</h6>
+            <p class="small text-muted">学習データをCSV形式でダウンロードします。</p>
+            <button class="btn btn-outline-dark w-100 mb-3" onclick="downloadCsv()">
+              <i class="bi bi-download me-2"></i>CSVダウンロード
+            </button>
+          </div>
+        </div>
+      </div>`;
+      
+    new Chart(document.getElementById('completionChart'), {
+      type: 'bar',
+      data: { labels: labels, datasets: [{ label: '人数', data: counts, backgroundColor: '#4285f4' }] },
+      options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true, ticks: { stepSize: 1 } } } }
+    });
+  }).getAnalysisData();
+}
+
+// 先生用モーダル類
+function showStudentAllData(name) {
+  const done = dataStore.clsProgress[name] || {}; 
+  const fb = dataStore.clsFeedback[name] || {}; 
+  const my = dataStore.clsMyTasks[name] || [];
+  const all = [...dataStore.masterTasks, ...my];
+  
+  let h = '<div class="list-group list-group-flush">';
+  all.forEach(t => {
+    const p = done[t.taskId] || {}; 
+    const s = fb[t.taskId];
+    const stamp = s ? {'check':'✅','good':'👍','great':'💮','support':'🚩'}[s] : '';
+    const reflectionHtml = p.reflection ? `<div class="small text-muted mt-1 p-2 bg-light border rounded"><i class="bi bi-chat-quote-fill me-1"></i>${p.reflection}</div>` : '';
+    const badgeClass = p.status === '完了' ? 'bg-success' : (p.status === '途中' ? 'bg-warning text-dark' : 'bg-secondary');
+    
+    h += `<div class="list-group-item">
+            <div class="d-flex justify-content-between align-items-center">
+              <div><span class="fw-bold">${t.title}</span> <span class="ms-2">${stamp}</span></div>
+              <span class="badge ${badgeClass}">${p.status||'未'}</span>
+            </div>
+            ${reflectionHtml}
+          </div>`;
+  });
+  Swal.fire({ title: `${name} さんのポートフォリオ`, html: `<div class="text-start" style="max-height:60vh;overflow-y:auto;">${h}</div>`, width:'600px', showCloseButton:true, showConfirmButton:false });
+}
+
+function showStudentTaskDetail(name, tid) {
+  const t = dataStore.masterTasks.find(x => x.taskId === tid);
+  const p = (dataStore.clsProgress[name] && dataStore.clsProgress[name][tid]) || {};
+  
+  Swal.fire({
+    title: `${name} さんの状況`,
+    html: `
+      <div class="text-start">
+        <h6 class="fw-bold text-primary">${t.title}</h6>
+        <div class="mb-3"><span class="badge bg-secondary me-1">状態: ${p.status||'未'}</span></div>
+        <div class="p-3 bg-light rounded mb-3 small">${p.reflection||'メモなし'}</div>
+        <hr><p class="small text-muted text-center mb-2">スタンプを送る</p>
+        <div class="d-flex justify-content-center gap-2">
+          <button class="btn btn-outline-primary rounded-circle p-2" style="width:50px;height:50px;font-size:1.5rem" onclick="sendStamp('${name}','${tid}','check')">✅</button>
+          <button class="btn btn-outline-primary rounded-circle p-2" style="width:50px;height:50px;font-size:1.5rem" onclick="sendStamp('${name}','${tid}','good')">👍</button>
+          <button class="btn btn-outline-primary rounded-circle p-2" style="width:50px;height:50px;font-size:1.5rem" onclick="sendStamp('${name}','${tid}','great')">💮</button>
+          <button class="btn btn-outline-primary rounded-circle p-2" style="width:50px;height:50px;font-size:1.5rem" onclick="sendStamp('${name}','${tid}','support')">🚩</button>
+        </div>
+      </div>`,
+    showConfirmButton: false, showCloseButton: true
+  });
+}
+
+function showTeacherTaskDetailSimple(tid) {
+  const t = dataStore.masterTasks.find(x => x.taskId === tid); if (!t) return;
+  Swal.fire({ title: t.title, html: `<div class="text-start"><p class="text-muted border p-3 rounded bg-light mb-0">${t.desc || '説明なし'}</p><div class="mt-2 text-end small text-muted">時間: ${t.time}分</div></div>`, showConfirmButton: false, showCloseButton: true });
+}
+
+function sendStamp(name, tid, stamp) {
+  // 楽観的更新
+  if (!dataStore.clsFeedback[name]) dataStore.clsFeedback[name] = {};
+  dataStore.clsFeedback[name][tid] = stamp;
+  renderTeacherDashboardContent();
+  
+  showToast('success', 'スタンプを送りました');
+  google.script.run.sendFeedback(name, tid, stamp);
+}
+
+function downloadCsv() {
+  const content = [
+    ["Student","TaskID","Status","Reflection","Timestamp"], 
+    ...Object.keys(dataStore.clsProgress).flatMap(n => 
+      Object.keys(dataStore.clsProgress[n]).map(tid => {
+        const p = dataStore.clsProgress[n][tid]; 
+        return [n,tid,p.status,p.reflection,new Date().toLocaleString()];
+      })
+    )
+  ].map(e => e.join(",")).join("\n");
+  
+  const blob = new Blob([content], {type:'text/csv'}); 
+  const url = URL.createObjectURL(blob); 
+  const a = document.createElement("a"); 
+  a.href = url; a.download = "learning_logs.csv"; 
+  a.click();
+}
+
+function openImportModal() {
+  Swal.fire({ 
+    title: 'JSONインポート', 
+    html: '<textarea id="ji" class="form-control" rows="10"></textarea>', 
+    showCancelButton: true, confirmButtonText: '実行' 
+  }).then(r => {
+    if (r.isConfirmed) { 
+      showLoading(); 
+      google.script.run.withSuccessHandler(d => { 
+        hideLoading(); 
+        Swal.fire('完了', d.count + '件', 'success'); 
+        loadMainData(); 
+      }).importUnitJson(document.getElementById('ji').value); 
+    } 
+  });
+}
+
+
+// ==========================================
+//  6. Utilities
+// ==========================================
+
+function showToast(icon, title) {
+  Swal.fire({ toast: true, position: 'top-end', icon: icon, title: title, timer: 2000, showConfirmButton: false });
+}
+
+function handleError(err) {
+  hideLoading();
+  Swal.fire({ title: 'システムエラー', text: err.message || err.toString(), icon: 'error' });
+}
+
+function showLoading() { const e = document.getElementById('loading'); if (e) e.classList.remove('d-none'); }
+function hideLoading() { const e = document.getElementById('loading'); if (e) e.classList.add('d-none'); }
+
+function toggleSettings() { 
+  if (document.getElementById('settingsModal')) {
+    new bootstrap.Modal(document.getElementById('settingsModal')).show();
+    unlockAudio();
+  }
+}
+
+function toggleDarkMode() {
+  const isDark = document.getElementById('darkModeSwitch').checked;
+  if (isDark) { document.body.setAttribute('data-theme', 'dark'); localStorage.setItem(CONSTANTS.LS_KEY_THEME, 'dark'); }
+  else { document.body.removeAttribute('data-theme'); localStorage.setItem(CONSTANTS.LS_KEY_THEME, 'light'); }
+}
+
+function toggleSound() {
+  appState.sound.enabled = document.getElementById('soundSwitch').checked;
+  if (appState.sound.enabled) unlockAudio();
+}
+
+function unlockAudio() {
+  const audio = document.getElementById('sos-chime');
+  if (audio && !appState.sound.unlocked) {
+    audio.volume = 0;
+    audio.play().then(() => { 
+      audio.pause(); 
+      audio.currentTime = 0; 
+      audio.volume = 0.5; 
+      appState.sound.unlocked = true; 
+    }).catch(e => {});
+  }
+}
+
+function checkSosAndPlaySound() {
+  if (!appState.sound.enabled) return;
+  const currentSosCount = dataStore.liveStatus.filter(d => d.mode === 'たすけて').length;
+  if (currentSosCount > appState.sound.prevSosCount) {
+    const audio = document.getElementById('sos-chime');
+    if (audio) audio.play().catch(e => { showToast('warning', 'SOS受信 (音声ブロック)'); });
+  }
+  appState.sound.prevSosCount = currentSosCount;
+}
+</script>
