@@ -1024,12 +1024,46 @@ function renderTeacherView() {
 function setTeacherClass(cls) { appState.view.teacherClassId = cls; renderTeacherView(); }
 function setTeacherView(mode) { appState.view.teacher = mode; renderTeacherView(); }
 
+// ----------------------------------------------------
+//  ダッシュボード表示のディスパッチャ（スタイル制御を追加）
+// ----------------------------------------------------
+
 function renderTeacherDashboardContent() {
   const el = document.getElementById('t-area');
   if (!el) return;
+  
+  // スクロール位置の保存
   const scrollPos = el.scrollTop;
+  
+  // ■ 追加修正: 親要素(main)とコンテナのスクロール制御
+  const mainEl = document.querySelector('main');
+  const appContainer = document.getElementById('app-container');
 
-  if (appState.view.teacher === 'summaries') { renderSummaryListView(el); el.scrollTop = scrollPos; return; }
+  if (mainEl && appContainer) {
+    if (appState.view.teacher === 'design') {
+      // 設計モード: 画面全体を固定し、内部スクロールのみ有効化
+      mainEl.style.overflow = 'hidden';      
+      mainEl.style.display = 'flex';         
+      mainEl.style.flexDirection = 'column';
+      mainEl.style.paddingBottom = '0';      // フッター余白削除
+      
+      // コンテナを画面一杯に広げる
+      appContainer.classList.add('h-100');
+      appContainer.style.overflow = 'hidden';
+    } else {
+      // 通常モード: 設定をリセット
+      mainEl.style.overflow = '';
+      mainEl.style.display = '';
+      mainEl.style.flexDirection = '';
+      mainEl.style.paddingBottom = ''; 
+      
+      appContainer.classList.remove('h-100');
+      appContainer.style.overflow = '';
+    }
+  }
+
+  // ビューの振り分け
+  if (appState.view.teacher === 'summaries') { renderSummaryListView(el); if(scrollPos>0) el.scrollTop = scrollPos; return; }
   if (appState.view.teacher === 'seating') { renderSeatingView(el); return; }
   if (appState.view.teacher === 'control') { renderControlView(el); return; }
   if (appState.view.teacher === 'design') { renderTeacherDesignView(el); return; } 
@@ -1041,7 +1075,7 @@ function renderTeacherDashboardContent() {
     renderHeatmap(el, targetStudents);
   }
   
-  if(scrollPos > 0) el.scrollTop = scrollPos;
+  if(appState.view.teacher !== 'design' && scrollPos > 0) el.scrollTop = scrollPos;
 }
 
 // ----------------------------------------------------
@@ -1274,7 +1308,16 @@ function saveAllListFeedbacks() {
 // ------------------------------------
 
 function renderTeacherDesignView(container) {
-  container.className = "flex-grow-1 overflow-hidden d-flex flex-column";
+  // 1. 再描画前のスクロール位置を保存
+  const poolContainer = document.getElementById('teacher-pool-container');
+  const poolScrollY = poolContainer ? poolContainer.scrollTop : 0;
+
+  const designScrollContainer = document.getElementById('teacher-design-scroll-view');
+  const designScrollY = designScrollContainer ? designScrollContainer.scrollTop : 0;
+
+  // コンテナの設定: 親要素の高さ一杯に広げ、はみ出しを隠す
+  container.className = "d-flex flex-column flex-grow-1 overflow-hidden h-100";
+  container.style.height = "100%";
   
   const currentTasks = getCurrentUnitTasks(); 
   const totalHours = appState.unit.totalHours; 
@@ -1295,6 +1338,7 @@ function renderTeacherDesignView(container) {
     }
   });
 
+  // 未配置プールのカードHTML生成
   let taskPoolHtml = '';
   taskPool.forEach(t => {
     const borderClass = getCategoryColorClass(t.category);
@@ -1309,6 +1353,7 @@ function renderTeacherDesignView(container) {
       </div>`;
   });
 
+  // 時数レーンのカードHTML生成
   let hoursHtml = '';
   for(let i = 1; i <= totalHours; i++) {
     let hourTasksHtml = '';
@@ -1345,9 +1390,10 @@ function renderTeacherDesignView(container) {
       </div>`;
   }
 
-  // ★変更点：ヘッダー部分に編集ボタンを追加
+  // 全体のHTML構造
   container.innerHTML = `
-    <div class="d-flex justify-content-between align-items-center mb-3 p-3 pb-0">
+    <!-- ヘッダーエリア (flex-shrink-0で縮小させない) -->
+    <div class="d-flex justify-content-between align-items-center mb-3 p-3 pb-0 flex-shrink-0">
       <div class="d-flex align-items-center">
         <h5 class="fw-bold m-0 text-muted me-2">単元計画</h5>
         
@@ -1365,25 +1411,44 @@ function renderTeacherDesignView(container) {
         </div>
       </div>
     </div>
-    <div class="row flex-grow-1 h-100 px-3 pb-3" style="min-height:0;">
-      <!-- 左側：未配置プール -->
-      <div class="col-4 h-100 border-end bg-white rounded-start d-flex flex-column">
-        <div class="p-2 border-bottom fw-bold text-muted d-flex justify-content-between align-items-center">
+    
+    <!-- メインエリア（2カラム） -->
+    <!-- min-height:0 がflexアイテムのスクロールに必須 -->
+    <div class="row flex-grow-1 px-3 pb-3 mx-0" style="min-height:0; overflow:hidden;">
+      
+      <!-- 左カラム：未配置プール -->
+      <div class="col-4 h-100 p-0 d-flex flex-column border-end bg-white rounded-start overflow-hidden">
+        <div class="p-2 border-bottom fw-bold text-muted d-flex justify-content-between align-items-center flex-shrink-0">
           <span><i class="bi bi-inbox me-2"></i>未配置・その他</span>
           <button class="btn btn-outline-primary btn-sm rounded-circle" onclick="openTeacherTaskEditModal('NEW')"><i class="bi bi-plus"></i></button>
         </div>
+        <!-- 独立スクロールエリア -->
         <div id="teacher-pool-container" class="flex-grow-1 overflow-auto p-2 teacher-design-dropzone" data-step="">
           ${taskPoolHtml}
         </div>
       </div>
-      <!-- 右側：時数レーン -->
-      <div class="col-8 h-100 overflow-auto bg-light rounded-end">
-        <div class="p-3">
+      
+      <!-- 右カラム：時数レーン -->
+      <div class="col-8 h-100 p-0 d-flex flex-column bg-light rounded-end overflow-hidden">
+        <!-- 独立スクロールエリア -->
+        <div id="teacher-design-scroll-view" class="flex-grow-1 overflow-auto p-3">
           <div class="alert alert-info small py-2 mb-3"><i class="bi bi-info-circle me-2"></i>ここでの変更は<strong>全員の初期計画（デフォルト）</strong>として保存されます。</div>
           ${hoursHtml}
         </div>
       </div>
+      
     </div>`;
+
+  // 2. スクロール位置の復元
+  const newPoolContainer = document.getElementById('teacher-pool-container');
+  if (newPoolContainer && poolScrollY > 0) {
+    newPoolContainer.scrollTop = poolScrollY;
+  }
+
+  const newDesignScrollContainer = document.getElementById('teacher-design-scroll-view');
+  if (newDesignScrollContainer && designScrollY > 0) {
+    newDesignScrollContainer.scrollTop = designScrollY;
+  }
 
   // Sortableの設定
   const dropZones = document.querySelectorAll('.teacher-design-dropzone');
@@ -2580,8 +2645,15 @@ function getStepNumber(stepStr) {
 }
 
 function renderStudentPlanning() {
-  const planContainer = document.querySelector('.plan-container'); const scrollX = planContainer ? planContainer.scrollLeft : 0;
-  const poolContainer = document.getElementById('task-pool-container'); const poolScrollY = poolContainer ? poolContainer.scrollTop : 0;
+  // スクロール位置の保存
+  // 右側の計画表エリア
+  const scrollContainer = document.getElementById('planning-scroll-view');
+  const scrollY = scrollContainer ? scrollContainer.scrollTop : 0;
+  
+  // 左側のタスクプールエリア
+  const poolContainer = document.getElementById('task-pool-container'); 
+  const poolScrollY = poolContainer ? poolContainer.scrollTop : 0;
+
   const currentTasks = getCurrentUnitTasks();
   const myTasksFiltered = dataStore.myTasks.filter(t => t.unitId === appState.unit.id);
   const allTasks = [...currentTasks, ...myTasksFiltered];
@@ -2608,45 +2680,47 @@ function renderStudentPlanning() {
     let plannedTasksHtml = '';
     const plannedIds = dataStore.studentPlan[String(i)] || [];
     let hourTotalTime = 0;
-    const addedTaskIds = new Set(); 
+    
+    // 表示用タスクリストの構築
+    let displayTasks = [];
+    
+    // A. 既存の計画にあるタスクを追加
+    plannedIds.forEach(tid => {
+      const t = allTasks.find(x => x.taskId === tid);
+      if (t) displayTasks.push(t);
+    });
 
-    // 1. 先生タスク（固定）
-    allTasks.forEach(t => {
-      if (t.format === 'teacher' && getStepNumber(t.step) === i) {
-        hourTotalTime += t.time;
-        const borderClass = getCategoryColorClass(t.category);
-        plannedTasksHtml += `<div class="card p-2 mb-2 shadow-sm ${borderClass}" style="opacity:0.9;" onclick="openTaskDetailModal('${t.taskId}')">
+    // B. 計画に含まれていない先生タスク（必須固定）があれば自動挿入（先頭へ）
+    const fixedTasks = allTasks.filter(t => t.format === 'teacher' && getStepNumber(t.step) === i);
+    fixedTasks.forEach(ft => {
+      if (!displayTasks.some(t => t.taskId === ft.taskId)) {
+         displayTasks.unshift(ft);
+      }
+    });
+
+    // C. HTML生成（一括処理）
+    displayTasks.forEach(t => {
+      hourTotalTime += t.time;
+      const borderClass = getCategoryColorClass(t.category);
+      const isTeacher = t.format === 'teacher';
+      
+      // 共通パーツ
+      const badge = isTeacher ? `<span class="badge bg-info text-white me-1" style="font-size:0.6em">固定</span>` : '';
+      const deleteBtn = isTeacher ? '' : `<i class="bi bi-x text-danger" style="cursor:pointer" onclick="event.stopPropagation(); removeFromPlan('${String(i)}', '${t.taskId}')"></i>`;
+      const bgStyle = t.category === 'マイタスク' ? 'background-color:#fbf5ff;' : (isTeacher ? 'opacity:0.9;' : '');
+      
+      // 修正点: 先生タスクにも 'task-draggable' クラスを付与し、ドラッグ可能にする
+      plannedTasksHtml += `
+        <div class="card p-2 mb-2 shadow-sm task-draggable ${borderClass}" style="${bgStyle}" data-id="${t.taskId}" onclick="openTaskDetailModal('${t.taskId}')">
           <div class="d-flex justify-content-between align-items-center">
-            <span class="small fw-bold text-truncate"><span class="badge bg-info text-white me-1" style="font-size:0.6em">固定</span>${t.title}</span>
+            <span class="small fw-bold text-truncate">${badge}${t.title}</span>
+            ${deleteBtn}
           </div>
           <div class="d-flex justify-content-between align-items-center mt-1">
             <span class="badge bg-light text-secondary border rounded-pill" style="font-size:0.6rem">${t.category}</span>
             <span class="x-small text-muted">${t.time}分</span>
           </div>
         </div>`;
-        addedTaskIds.add(t.taskId);
-      }
-    });
-
-    // 2. 生徒タスク
-    plannedIds.forEach(tid => {
-      if (addedTaskIds.has(tid)) return;
-
-      const t = allTasks.find(x => x.taskId === tid);
-      if (t) {
-        hourTotalTime += t.time;
-        const borderClass = getCategoryColorClass(t.category);
-        plannedTasksHtml += `<div class="card p-2 mb-2 shadow-sm task-draggable ${borderClass}" style="${t.category==='マイタスク'?'background-color:#fbf5ff;':''}" data-id="${t.taskId}" onclick="openTaskDetailModal('${t.taskId}')">
-            <div class="d-flex justify-content-between">
-              <span class="small fw-bold text-truncate">${t.title}</span>
-              <i class="bi bi-x text-danger" style="cursor:pointer" onclick="event.stopPropagation(); removeFromPlan('${String(i)}', '${tid}')"></i>
-            </div>
-            <div class="d-flex justify-content-between align-items-center mt-1">
-              <span class="badge bg-light text-secondary border rounded-pill" style="font-size:0.6rem">${t.category}</span>
-              <span class="x-small text-muted">${t.time}分</span>
-            </div>
-          </div>`;
-      }
     });
 
     const timeRatio = Math.min(hourTotalTime / CONSTANTS.UNIT_TIME, 1) * 100;
@@ -2686,7 +2760,8 @@ function renderStudentPlanning() {
           <div id="task-pool-container" class="flex-grow-1 overflow-auto p-2"><div id="task-pool">${taskPoolHtml}</div></div>
         </div>
         <!-- 右側：計画表（縦スクロール） -->
-        <div class="col-8 h-100 overflow-auto">
+        <!-- ID 'planning-scroll-view' を追加してスクロール位置を管理 -->
+        <div id="planning-scroll-view" class="col-8 h-100 overflow-auto">
           <div class="plan-container-v h-100 pt-2">
             ${hoursHtml}
           </div>
@@ -2694,7 +2769,12 @@ function renderStudentPlanning() {
       </div>
     </div>`;
 
-  const newPoolContainer = document.getElementById('task-pool-container'); if (newPoolContainer) newPoolContainer.scrollTop = poolScrollY;
+  // スクロール位置の復元
+  const newPoolContainer = document.getElementById('task-pool-container'); 
+  if (newPoolContainer) newPoolContainer.scrollTop = poolScrollY;
+
+  const newScrollContainer = document.getElementById('planning-scroll-view');
+  if (newScrollContainer) newScrollContainer.scrollTop = scrollY;
   
   new Sortable(document.getElementById('task-pool'), { group: { name: 'shared', pull: 'clone', put: false }, sort: false, animation: 150 });
   
@@ -2705,10 +2785,21 @@ function renderStudentPlanning() {
       animation: 150,
       draggable: ".task-draggable", 
       onAdd: function (evt) {
-        const tid = evt.item.getAttribute('data-id');
-        const h = String(evt.to.getAttribute('data-hour'));
-        addToPlan(h, tid);
-        evt.item.remove();
+        const hour = String(evt.to.getAttribute('data-hour'));
+        const newOrder = this.toArray(); 
+        updatePlanByOrder(hour, newOrder);
+        
+        setTimeout(() => renderStudentPlanning(), 0);
+      },
+      onUpdate: function (evt) {
+        const hour = String(evt.to.getAttribute('data-hour'));
+        const newOrder = this.toArray();
+        updatePlanByOrder(hour, newOrder);
+      },
+      onRemove: function (evt) {
+        const hour = String(evt.from.getAttribute('data-hour'));
+        const newOrder = this.toArray(); 
+        updatePlanByOrder(hour, newOrder);
       }
     });
   });
