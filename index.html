@@ -22,7 +22,7 @@
 <body class="bg-light">
 
   <!-- SOS通知音 (Base64) -->
-  <audio id="sos-chime" preload="auto" src="data:audio/mp3;base64,//uQRAAAAWMSLwUIYAAsYkXgoQwAEaYLWfkWgAI0wWs/ItAAAG1xUAALDkAAXG1iAAQA//4QBaKSAAAG1xUAALDkAAXG1iAAQA//4QBaKSAAAG1xUAALDkAAXG1iAAQA//4QBaKSAAAG1xUAALDkAAXG1iAAQA//4QBaKSAAAG1xUAALDkAAXG1iAAQA//4QBaKSAAAG1xUAALDkAAXG1iAAQA//4QBaKSAAAG1xUAALDkAAXG1iAAQA//4QBaKSAAAG1xUAALDkAAXG1iAAQA//4QBaKSAAAG1xUAALDkAAXG1iAAQA//4QBaKSAAAG1xUAALDkAAXG1iAAQA//4QBaKSAAAG1xUAALDkAAXG1iAAQA//4QBaKSAAAG1xUAALDkAAXG1iAAQA//4QBaKSAAAG1xUAALDkAAXG1iAAQA//4QBaKSAAAG1xUAALDkAAXG1iAAQA//4QBaKSAAAG1xUAALDkAAXG1iAAQA//4QBaKSAAAG1xUAALDkAAXG1iAAQA//4QBaKSAAAG1xUAALDkAAXG1iAAQA//4QBaKSAAAG1xUAALDkAAXG1iAAQA//4QBaKSAAAG1xUAALDkAAXG1iAAQA//4QBaKS"></audio>
+  <audio id="sos-chime" preload="auto" src="data:audio/mp3;base64,//uQRAAAAWMSLwUIYAAsYkXgoQwAEaYLWfkWgAI0wWs/ItAAAG1xUAALDkAAXG1iAAQA//4QBaKSAAAG1xUAALDkAAXG1iAAQA//4QBaKSAAAG1xUAALDkAAXG1iAAQA//4QBaKSAAAG1xUAALDkAAXG1iAAQA//4QBaKSAAAG1xUAALDkAAXG1iAAQA//4QBaKSAAAG1xUAALDkAAXG1iAAQA//4QBaKSAAAG1xUAALDkAAXG1iAAQA//4QBaKSAAAG1xUAALDkAAXG1iAAQA//4QBaKSAAAG1xUAALDkAAXG1iAAQA//4QBaKSAAAG1xUAALDkAAXG1iAAQA//4QBaKSAAAG1xUAALDkAAXG1iAAQA//4QBaKSAAAG1xUAALDkAAXG1iAAQA//4QBaKSAAAG1xUAALDkAAXG1iAAQA//4QBaKSAAAG1xUAALDkAAXG1iAAQA//4QBaKSAAAG1xUAALDkAAXG1iAAQA//4QBaKS"></audio>
 
   <!-- ローディング画面 -->
   <div id="loading" class="position-fixed w-100 h-100 top-0 start-0 d-flex flex-column justify-content-center align-items-center bg-white" style="z-index: 9999;">
@@ -76,53 +76,6 @@
     <small>&copy; 2026 みらいコンパス <a href="https://note.com/cute_borage86" target="_blank" class="text-decoration-none text-muted">GIGA山</a></small>
     <a href="#" class="text-decoration-none text-muted small" style="font-size:0.75rem;" onclick="attemptTeacherLogin(); return false;">教員用ログイン</a>
   </footer>
-
-  <!-- 設定モーダル（先生専用） -->
-  <div class="modal fade" id="settingsModal" tabindex="-1" aria-labelledby="settingsModalLabel" aria-hidden="true">
-    <div class="modal-dialog">
-      <div class="modal-content rounded-4 shadow border-0 transition-bg">
-        <div class="modal-header border-0 pb-0">
-          <h5 class="modal-title fw-bold" id="settingsModalLabel"><ruby>設定<rt>せってい</rt></ruby></h5>
-          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-        </div>
-        <div class="modal-body">
-          <p class="text-muted small mb-3">※この画面は先生のみアクセスできます。</p>
-          
-          <div class="d-grid gap-2">
-            <!-- 名簿管理ボタンの追加 -->
-            <button class="btn btn-outline-success rounded-pill mb-3" onclick="openRosterManagerModal()">
-              <i class="bi bi-people-fill me-2"></i>名簿管理
-            </button>
-            
-            <hr class="my-1">
-
-            <button class="btn btn-outline-primary rounded-pill" id="btn-view-ss">
-              <i class="bi bi-table me-2"></i>データファイルを開く
-            </button>
-            <button class="btn btn-outline-danger rounded-pill" id="btn-archive" onclick="confirmArchive()">
-              <i class="bi bi-archive-fill me-2"></i><ruby>現在<rt>げんざい</rt></ruby>の<ruby>単元<rt>たんげん</rt></ruby>をアーカイブ
-            </button>
-            <button class="btn btn-outline-secondary rounded-pill mt-2" onclick="changePasswordPrompt()">
-              <i class="bi bi-key me-2"></i>パスワード変更
-            </button>
-          </div>
-
-          <!-- 連携設定 (追加) -->
-          <hr class="my-3">
-          <div class="mb-2">
-            <label for="passportUrlInput" class="form-label fw-bold small text-primary"><i class="bi bi-link-45deg me-1"></i>みらいパスポート連携</label>
-            <input type="url" class="form-control form-control-sm mb-2" id="passportUrlInput" placeholder="https://script.google.com/macros/s/.../exec">
-            <div class="d-grid">
-              <button class="btn btn-primary rounded-pill btn-sm" onclick="App.saveSettings()">
-                <i class="bi bi-save me-1"></i>連携設定を保存
-              </button>
-            </div>
-          </div>
-
-        </div>
-      </div>
-    </div>
-  </div>
 
   <!-- ライブラリ群 -->
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
