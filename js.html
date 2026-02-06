@@ -1,8 +1,9 @@
 <script>
 /**
- * みらいコンパス Ver. 1.2 - クライアントサイドロジック
+ * みらいコンパス Ver. 1.3 - クライアントサイドロジック
  * * 画面の描画、ボタン操作、サーバーとの通信などを制御します。
- * * Update: みらいパスポート連携機能（Launcher）を追加
+ * * Update: みらいパスポート連携機能（Launcher, Status Sync）を強化
+ * * Update: 単元計画の一括連携（共有DB直接書き込み方式）に対応 (Phase 3)
  */
 
 // ==========================================
@@ -14,7 +15,7 @@ const CONSTANTS = {
   LS_KEY_CLASS: 'mirai_student_class',
   LS_KEY_UNIT: 'mirai_current_unit_id',
   UNIT_TIME: 45,
-  REFRESH_INTERVAL: 30000,
+  REFRESH_INTERVAL: 15000, // 更新頻度を少し上げる
   SEAT_GRID_SIZE: 110,
   
   CLASS_PERIODS: [
@@ -124,7 +125,8 @@ let appState = {
   unit: { id: "", title: "", totalHours: 8, currentHour: 1 },
   unitList: [],
   schedules: [],
-  passportUrl: "" // [追加] みらいパスポート連携URL
+  passportUrl: "", // みらいパスポート連携URL (Web App)
+  passportDbId: "" // [New] みらいパスポート連携DB ID (Spreadsheet)
 };
 
 // データストア
@@ -162,6 +164,10 @@ let myTimer = {
   target: 0
 };
 
+// --- Helper Functions for Mode Status ---
+function isSosMode(mode) { return mode === 'たすけて' || mode === 'sos'; }
+function isFocusMode(mode) { return mode === 'しゅうちゅう' || mode === 'focus'; }
+
 // ==========================================
 //  2. 初期化プロセス (Initialization)
 // ==========================================
@@ -196,11 +202,17 @@ function loadMainData() {
   const container = document.getElementById('app-container');
   if (!container.hasChildNodes() || container.innerHTML === '') showLoading();
   
-  // 連携用URLの取得（並行処理）
+  // 連携用情報の取得（並行処理）
+  // URLとDB IDの両方を取得してstateに保存
   google.script.run
     .withSuccessHandler(url => { appState.passportUrl = url; })
     .withFailureHandler(e => console.warn('Passport URL Load Failed', e))
     .getPassportUrl();
+    
+  google.script.run
+    .withSuccessHandler(id => { appState.passportDbId = id; })
+    .withFailureHandler(e => console.warn('Passport DB ID Load Failed', e))
+    .getPassportDbId();
 
   // メインデータの取得
   google.script.run
@@ -439,7 +451,7 @@ function renderApp() {
     if (appState.mode === 'teacher') {
       mainEl.classList.add('teacher-mode');
       settingsBtn.classList.remove('d-none'); 
-      exitBtn.classList.remove('d-none');      
+      exitBtn.classList.remove('d-none');       
       renderTeacherView();
     } else {
       mainEl.classList.remove('teacher-mode');
@@ -754,8 +766,8 @@ function submitUserStatus(mode) {
   renderStudentView();
   
   let msg = "ステータス解除"; let icon = "success";
-  if (mode === 'たすけて') { msg = "SOS送信！"; icon = "warning"; }
-  else if (mode === 'しゅうちゅう') { msg = "集中モード開始"; icon = "info"; }
+  if (isSosMode(mode)) { msg = "SOS送信！"; icon = "warning"; }
+  else if (isFocusMode(mode)) { msg = "集中モード開始"; icon = "info"; }
   if (mode !== '通常' && mode !== '') showToast(icon, msg);
   
   google.script.run
@@ -1067,8 +1079,8 @@ function renderTeacherDashboardContent() {
   if (mainEl && appContainer) {
     if (appState.view.teacher === 'design') {
       // 設計モード: 画面全体を固定し、内部スクロールのみ有効化
-      mainEl.style.overflow = 'hidden';       
-      mainEl.style.display = 'flex';          
+      mainEl.style.overflow = 'hidden';        
+      mainEl.style.display = 'flex';           
       mainEl.style.flexDirection = 'column';
       mainEl.style.paddingBottom = '0';       // フッター余白削除
       
@@ -1427,13 +1439,18 @@ function renderTeacherDesignView(container) {
           <i class="bi bi-pencil-fill"></i>
         </button>
 
-        <div class="input-group input-group-sm w-auto">
+        <div class="input-group input-group-sm w-auto me-3">
           <span class="input-group-text">全</span>
           <input type="text" class="form-control text-center fw-bold" value="${totalHours}" style="width:50px;" readonly>
           <span class="input-group-text">時間</span>
           <button class="btn btn-outline-secondary" onclick="changeUnitTotalHours(1)"><i class="bi bi-plus-lg"></i></button>
           <button class="btn btn-outline-secondary" onclick="changeUnitTotalHours(-1)"><i class="bi bi-dash-lg"></i></button>
         </div>
+
+        <!-- [New] ワークシート作成連携ボタン -->
+        <button class="btn btn-primary btn-sm rounded-pill px-3 shadow-sm" onclick="syncUnitToPassport()" title="みらいパスポートでワークシートを作成">
+          <i class="bi bi-rocket-takeoff-fill me-2"></i>WS作成連携
+        </button>
       </div>
     </div>
     
@@ -1500,6 +1517,56 @@ function renderTeacherDesignView(container) {
         }
       }
     });
+  });
+}
+
+// [New] 単元計画をパスポートへ送信して一括生成へ誘導（共有DB方式）
+function syncUnitToPassport() {
+  if (!appState.passportDbId || !appState.passportUrl) {
+    Swal.fire({
+      icon: 'warning',
+      title: '連携未設定',
+      text: '「みらいパスポート」のDB IDまたはURLが設定されていません。右上の設定ボタンから登録してください。'
+    });
+    return;
+  }
+
+  Swal.fire({
+    title: 'ワークシート作成連携',
+    text: `現在の単元「${appState.unit.title}」の計画データをパスポートのDBへ送信し、ワークシートを一括作成しますか？`,
+    icon: 'question',
+    showCancelButton: true,
+    confirmButtonColor: '#1a73e8',
+    confirmButtonText: '送信して作成開始',
+    cancelButtonText: 'キャンセル'
+  }).then((result) => {
+    if (result.isConfirmed) {
+      showLoading(); // UIブロック
+      
+      // HTTP通信ではなく、直接DB書き込み関数を呼び出す
+      google.script.run
+        .withSuccessHandler(res => {
+          hideLoading();
+          if (res.success) {
+            Swal.fire({
+              title: '連携成功',
+              text: 'みらいパスポートを開きます。自動生成ウィザードに従って作成してください。',
+              icon: 'success',
+              timer: 2000,
+              showConfirmButton: false
+            });
+            
+            // パスポートを別タブで開き、自動生成モード(importId付き)にする
+            if (res.passportUrl) {
+               window.open(res.passportUrl, '_blank');
+            }
+          } else {
+            handleError({ message: res.message || '連携に失敗しました' });
+          }
+        })
+        .withFailureHandler(handleError)
+        .sendUnitPlanToPassport_DirectDB(appState.unit.id);
+    }
   });
 }
 
@@ -2165,11 +2232,14 @@ function renderLiveCards(container, students) {
       const isOtherUnit = s.currentUnitId && s.currentUnitId !== appState.unit.id;
       const opacity = isOtherUnit ? '0.5' : '1';
       const taskDisplay = isOtherUnit ? '<span class="small text-secondary">他単元を学習中</span>' : (s.task || '-');
+      // [Update] 英語/日本語モード両対応
+      const isSos = isSosMode(s.mode);
+      const isFocus = isFocusMode(s.mode);
       return `
       <div class="col">
-        <div class="card h-100 text-center p-3 shadow-sm border-0 rounded-4 ${s.mode==='たすけて'?'sos-alert':''}" style="opacity: ${opacity}">
+        <div class="card h-100 text-center p-3 shadow-sm border-0 rounded-4 ${isSos ? 'sos-alert' : ''}" style="opacity: ${opacity}">
           <div class="fw-bold text-truncate mb-2">${s.name}</div>
-          <i class="bi bi-person-circle fs-1 my-2 ${s.mode==='たすけて'?'text-danger':s.mode==='しゅうちゅう'?'text-info':'text-secondary'}"></i>
+          <i class="bi bi-person-circle fs-1 my-2 ${isSos ? 'text-danger' : (isFocus ? 'text-info' : 'text-secondary')}"></i>
           <div class="small text-muted text-truncate">${taskDisplay}</div>
           <div class="badge bg-light text-muted mt-1 fw-normal">${s.mode}</div>
         </div>
@@ -2189,7 +2259,8 @@ function renderHeatmap(container, students) {
   
   studentNames.forEach(n => {
     const st = dataStore.liveStatus.find(d => d.name === n);
-    const ic = (st && st.mode === 'たすけて') ? '<i class="bi bi-exclamation-circle-fill text-danger ms-1 animate__animated animate__flash"></i>' : (st && st.mode === 'しゅうちゅう' ? '<i class="bi bi-lightning-fill text-info ms-1"></i>' : '');
+    // [Update] 英語/日本語モード両対応
+    const ic = (st && isSosMode(st.mode)) ? '<i class="bi bi-exclamation-circle-fill text-danger ms-1 animate__animated animate__flash"></i>' : (st && isFocusMode(st.mode) ? '<i class="bi bi-lightning-fill text-info ms-1"></i>' : '');
     h += `<tr><td class="text-start fw-bold text-truncate" style="max-width:120px;cursor:pointer;text-decoration:underline" onclick="renderPortfolioModal('${n}', true)">${n}${ic}</td>`;
     
     currentTasks.forEach(t => {
@@ -2198,7 +2269,7 @@ function renderHeatmap(container, students) {
       let cls = "", icon = "";
       if (p.status === '完了') cls = "heatmap-done";
       else if (p.status === '途中') cls = "heatmap-doing";
-      else if (st && st.mode === 'たすけて') cls = "heatmap-sos";
+      else if (st && isSosMode(st.mode)) cls = "heatmap-sos";
       if (stamp) { if(stamp==='check') icon='✅'; if(stamp==='good') icon='👍'; if(stamp==='great') icon='💮'; if(stamp==='support') icon='🚩'; }
       h += `<td><div class="heatmap-cell-wrapper" onclick="showStudentTaskDetail('${n}', '${t.taskId}')"><div class="heatmap-cell ${cls}" title="${t.title}">${icon}</div></div></td>`;
     });
@@ -2233,9 +2304,12 @@ function renderSeatingView(container) {
   students.forEach(s => {
     const x = s.x || 50;
     const y = s.y || 50;
+    // [Update] 英語/日本語モード両対応
+    const isSos = isSosMode(s.mode);
+    const isFocus = isFocusMode(s.mode);
     
     const card = document.createElement('div');
-    card.className = `card shadow-sm seat-card position-absolute ${s.mode==='たすけて'?'sos-alert':''}`;
+    card.className = `card shadow-sm seat-card position-absolute ${isSos ? 'sos-alert' : ''}`;
     card.style.left = x + 'px';
     card.style.top = y + 'px';
     card.style.width = '100px';
@@ -2244,7 +2318,7 @@ function renderSeatingView(container) {
     card.innerHTML = `
       <div class="card-body p-2 text-center" style="cursor: move;" onmousedown="startDragSeat(event, this)" ontouchstart="startDragSeat(event, this)">
         <div class="fw-bold text-truncate small mb-1">${s.name}</div>
-        <i class="bi bi-person-circle fs-3 ${s.mode==='たすけて'?'text-danger':s.mode==='しゅうちゅう'?'text-info':'text-secondary'}"></i>
+        <i class="bi bi-person-circle fs-3 ${isSos ? 'text-danger' : (isFocus ? 'text-info' : 'text-secondary')}"></i>
         <div class="x-small text-muted text-truncate mt-1">${s.task || '-'}</div>
       </div>
     `;
@@ -2367,51 +2441,67 @@ function handleError(err) { hideLoading(); Swal.fire({ title: 'システムエ�
 function showLoading() { const e = document.getElementById('loading'); if (e) e.classList.remove('d-none'); }
 function hideLoading() { const e = document.getElementById('loading'); if (e) e.classList.add('d-none'); }
 
-// [Update] 設定モーダルの表示（URL初期値セット）
+// [Update] 設定モーダルの表示（HTML非依存のダイナミック生成）
+// パスポートDB ID と URL の両方を設定可能にする
 function toggleSettings() { 
-  if (document.getElementById('settingsModal')) { 
-    // Passport連携URLをセット
-    const urlInput = document.getElementById('passportUrlInput');
-    if (urlInput) urlInput.value = appState.passportUrl || "";
-    
-    new bootstrap.Modal(document.getElementById('settingsModal')).show(); 
-  } 
+  Swal.fire({
+    title: '設定',
+    html: `
+      <div class="text-start">
+        <label class="form-label small fw-bold">みらいパスポート URL</label>
+        <input type="url" id="swal-passport-url" class="form-control mb-3" placeholder="https://script.google.com/..." value="${appState.passportUrl || ''}">
+        
+        <label class="form-label small fw-bold">みらいパスポート DB ID</label>
+        <input type="text" id="swal-passport-db-id" class="form-control mb-3" placeholder="スプレッドシートID" value="${appState.passportDbId || ''}">
+        
+        <div class="d-grid gap-2">
+          <button class="btn btn-outline-secondary btn-sm" onclick="changePasswordPrompt()">教員パスワード変更</button>
+          <button class="btn btn-outline-secondary btn-sm" onclick="openRosterManagerModal()">名簿管理</button>
+        </div>
+      </div>
+    `,
+    showCancelButton: true,
+    confirmButtonText: '保存',
+    preConfirm: () => {
+      return {
+        url: document.getElementById('swal-passport-url').value,
+        dbId: document.getElementById('swal-passport-db-id').value
+      };
+    }
+  }).then((result) => {
+    if (result.isConfirmed) {
+      const data = result.value;
+      if (data.url && !data.url.startsWith('http')) {
+        Swal.fire('エラー', '正しいURLを入力してください', 'error');
+        return;
+      }
+      showLoading();
+      google.script.run
+        .withSuccessHandler(() => {
+          appState.passportUrl = data.url;
+          appState.passportDbId = data.dbId;
+          hideLoading();
+          showToast('success', '設定を保存しました');
+        })
+        .withFailureHandler(handleError)
+        .savePassportConfig(data.dbId, data.url);
+    }
+  });
 }
 
-// [New] 設定保存処理（Passport URL含む）
-function App() {} // Namespace placeholder if needed
-App.saveSettings = function() {
-  const url = document.getElementById('passportUrlInput').value.trim();
-  
-  // URLバリデーション（簡易）
-  if (url && !url.startsWith('http')) {
-    Swal.showValidationMessage('正しいURLを入力してください');
-    return;
-  }
-
-  const btn = document.querySelector('#settingsModal .btn-primary'); // 保存ボタン
-  const originalText = btn.innerHTML;
-  btn.disabled = true;
-  btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>保存中...';
-
-  google.script.run
-    .withSuccessHandler(() => {
-      appState.passportUrl = url;
-      showToast('success', '設定を保存しました');
-      btn.disabled = false;
-      btn.innerHTML = originalText;
-      bootstrap.Modal.getInstance(document.getElementById('settingsModal')).hide();
-    })
-    .withFailureHandler((e) => {
-      handleError(e);
-      btn.disabled = false;
-      btn.innerHTML = originalText;
-    })
-    .savePassportUrl(url);
-};
+// [Legacy] 後方互換性のためApp名前空間も維持（必要なら）
+function App() {} 
 
 function unlockAudio() { const audio = document.getElementById('sos-chime'); if (audio && !appState.sound.unlocked) { audio.volume = 0; audio.play().then(() => { audio.pause(); audio.currentTime = 0; audio.volume = 0.5; appState.sound.unlocked = true; }).catch(e => {}); } }
-function checkSosAndPlaySound() { const currentSosCount = dataStore.liveStatus.filter(d => d.mode === 'たすけて').length; if (currentSosCount > appState.sound.prevSosCount) { const audio = document.getElementById('sos-chime'); if (audio) audio.play().catch(e => {}); } appState.sound.prevSosCount = currentSosCount; }
+function checkSosAndPlaySound() { 
+  // SOSカウント判定（英語モードも考慮）
+  const currentSosCount = dataStore.liveStatus.filter(d => isSosMode(d.mode)).length; 
+  if (currentSosCount > appState.sound.prevSosCount) { 
+    const audio = document.getElementById('sos-chime'); 
+    if (audio) audio.play().catch(e => {}); 
+  } 
+  appState.sound.prevSosCount = currentSosCount; 
+}
 
 function getStepNumber(stepStr) {
   if(!stepStr) return -1;
@@ -2511,8 +2601,8 @@ function renderStudentDaily() {
   }
   
   let stBadge = ''; let rstBtn = 'd-none';
-  if (myStat.mode === 'たすけて') { stBadge = `<span class="badge bg-danger rounded-pill px-2 py-1 me-2 animate__animated animate__flash">SOS</span>`; rstBtn = ''; } 
-  else if (myStat.mode === 'しゅうちゅう') { stBadge = `<span class="badge bg-info text-white rounded-pill px-2 py-1 me-2 animate__animated animate__pulse">集中</span>`; rstBtn = ''; }
+  if (isSosMode(myStat.mode)) { stBadge = `<span class="badge bg-danger rounded-pill px-2 py-1 me-2 animate__animated animate__flash">SOS</span>`; rstBtn = ''; } 
+  else if (isFocusMode(myStat.mode)) { stBadge = `<span class="badge bg-info text-white rounded-pill px-2 py-1 me-2 animate__animated animate__pulse">集中</span>`; rstBtn = ''; }
   
   // 単元情報の表示
   const currentUnit = appState.unitList.find(u => u.id === appState.unit.id) || {};
@@ -2561,7 +2651,7 @@ function createStudentTaskCard(t) {
   
   let stampHtml = stamp ? `<div class="stamp-badge animate__animated animate__bounceIn">${{'check':'✅','good':'👍','great':'💮','support':'🚩'}[stamp]||''}</div>` : '';
   
-  // [修正点] Passport起動ボタンの生成
+  // [New] みらいパスポート起動ボタンの生成
   let passportBtn = '';
   // 先生タスク・マイタスク以外で、かつPassport連携URLが設定されている場合に表示
   if (t.format !== 'teacher' && t.category !== 'マイタスク' && appState.passportUrl) {
@@ -2981,11 +3071,10 @@ function launchPassport(taskId) {
   }
 
   // 連携用URLの生成 (自動ログイン用パラメータ付き)
-  // 学年やクラスIDは必要なら追加可能だが、現状はPassport側の自動生成に任せるため最小限に
   const params = new URLSearchParams({
     mode: 'student',
     taskId: taskId,
-    studentId: appState.user.name, // 簡易的に名前をIDとして使用 (運用上ユニークである前提)
+    studentId: appState.user.name, // 簡易的に名前をIDとして使用
     studentName: appState.user.name
   });
 
@@ -3050,7 +3139,6 @@ function attemptTeacherLogin() {
       });
     }
   }).then((result) => {
-    // バリデーションエラー時はresultがfalseになるため、isConfirmedだけをチェック
     if (result.isConfirmed) {
       switchMode('teacher');
       showToast('success', '先生モードでログインしました');
@@ -3079,49 +3167,50 @@ function changePasswordPrompt() {
 
 function openRosterManagerModal() {
   // 設定モーダルを一旦閉じる
-  const settingsModalEl = document.getElementById('settingsModal');
-  const modal = bootstrap.Modal.getInstance(settingsModalEl);
-  if (modal) modal.hide();
+  // Note: SweetAlertは重複できないため、自動的に閉じるが明示的に閉じる処理を入れてもよい
+  Swal.close();
 
-  Swal.fire({
-    title: '<i class="bi bi-people-fill me-2"></i>名簿管理',
-    html: `
-      <div class="text-start">
-        <p class="small text-muted mb-3">
-          クラスごとの名簿を登録・編集します。<br>
-          名前を改行区切りで貼り付けるだけで一括登録できます。
-        </p>
-        <div class="mb-3">
-          <label class="form-label small fw-bold">クラス名</label>
-          <input type="text" id="roster-class" class="form-control" list="roster-class-list" placeholder="例：1組">
-          <datalist id="roster-class-list">
-            <option value="1組">
-            <option value="2組">
-            <option value="3組">
-          </datalist>
+  setTimeout(() => {
+    Swal.fire({
+      title: '<i class="bi bi-people-fill me-2"></i>名簿管理',
+      html: `
+        <div class="text-start">
+          <p class="small text-muted mb-3">
+            クラスごとの名簿を登録・編集します。<br>
+            名前を改行区切りで貼り付けるだけで一括登録できます。
+          </p>
+          <div class="mb-3">
+            <label class="form-label small fw-bold">クラス名</label>
+            <input type="text" id="roster-class" class="form-control" list="roster-class-list" placeholder="例：1組">
+            <datalist id="roster-class-list">
+              <option value="1組">
+              <option value="2組">
+              <option value="3組">
+            </datalist>
+          </div>
+          <div class="mb-3">
+            <label class="form-label small fw-bold">児童名リスト（1行に1名）</label>
+            <textarea id="roster-names" class="form-control" rows="10" placeholder="相川 健太&#13;&#10;飯田 美咲&#13;&#10;..."></textarea>
+          </div>
+          <div class="d-flex justify-content-between align-items-center">
+              <button class="btn btn-outline-secondary btn-sm" onclick="loadRosterToTextarea()">
+                <i class="bi bi-arrow-clockwise me-1"></i>既存データを読込
+              </button>
+              <button class="btn btn-success rounded-pill px-4" onclick="submitSaveRoster()">
+                <i class="bi bi-save me-1"></i>保存する
+              </button>
+          </div>
         </div>
-        <div class="mb-3">
-          <label class="form-label small fw-bold">児童名リスト（1行に1名）</label>
-          <textarea id="roster-names" class="form-control" rows="10" placeholder="相川 健太&#13;&#10;飯田 美咲&#13;&#10;..."></textarea>
-        </div>
-        <div class="d-flex justify-content-between align-items-center">
-            <button class="btn btn-outline-secondary btn-sm" onclick="loadRosterToTextarea()">
-              <i class="bi bi-arrow-clockwise me-1"></i>既存データを読込
-            </button>
-            <button class="btn btn-success rounded-pill px-4" onclick="submitSaveRoster()">
-              <i class="bi bi-save me-1"></i>保存する
-            </button>
-        </div>
-      </div>
-    `,
-    showConfirmButton: false,
-    showCloseButton: true,
-    width: '600px',
-    didOpen: () => {
-      // クラス名が入力されたら、既存データがあれば読み込む
-      document.getElementById('roster-class').addEventListener('change', loadRosterToTextarea);
-    }
-  });
+      `,
+      showConfirmButton: false,
+      showCloseButton: true,
+      width: '600px',
+      didOpen: () => {
+        // クラス名が入力されたら、既存データがあれば読み込む
+        document.getElementById('roster-class').addEventListener('change', loadRosterToTextarea);
+      }
+    });
+  }, 300);
 }
 
 function loadRosterToTextarea() {
@@ -3135,10 +3224,8 @@ function loadRosterToTextarea() {
   
   if (names.length > 0) {
     document.getElementById('roster-names').value = names.join('\n');
-    // showToast('info', `${names.length}名のデータを読み込みました`);
   } else {
     document.getElementById('roster-names').value = "";
-    // showToast('info', 'このクラスのデータはありません');
   }
 }
 
