@@ -1,8 +1,10 @@
 /**
- * 🧭 みらいコンパス Ver. 1.3 - サーバーサイドプログラム
+ * 🧭 みらいコンパス Ver. 1.5 - サーバーサイドプログラム
  * * このファイルは、Googleスプレッドシート（データベース）とのやり取りを担当します。
  * データの保存、読み出し、初期設定などの機能が含まれています。
  * Update: Phase 3 完全DB連携（HTTP廃止）対応
+ * Update: Phase 3 Passport連携（ステータス同期受信）
+ * Update: Phase 3 リアルタイムダッシュボード用軽量API追加
  */
 
 // ==========================================
@@ -76,6 +78,35 @@ function doGet(e) {
   }
 }
 
+/**
+ * [New] 外部からのデータ受信 (Passportからのステータス同期)
+ * POSTリクエストを受け取り、LiveStatusを更新します。
+ */
+function doPost(e) {
+  const output = ContentService.createTextOutput();
+  output.setMimeType(ContentService.MimeType.JSON);
+
+  try {
+    if (!e.postData || !e.postData.contents) {
+      throw new Error("No Data received");
+    }
+
+    const json = JSON.parse(e.postData.contents);
+    
+    // Passportからのアクション: { action: 'syncMode'|'syncStatus', studentId, ... }
+    if (json.action === 'syncMode' || json.action === 'syncStatus') {
+      updateLiveStatusFromPassport(json);
+    }
+    
+    output.setContent(JSON.stringify({ success: true }));
+
+  } catch (err) {
+    output.setContent(JSON.stringify({ success: false, error: err.message }));
+  }
+  
+  return output;
+}
+
 function getAppInitialData() {
   try {
     const ssId = PROPERTIES.getProperty('SS_ID');
@@ -144,10 +175,6 @@ function getData() {
     const ss = SpreadsheetApp.openById(ssId);
     checkAndFixSheets(ss);
 
-    // [New] 共有DB連携: パスポートのデータを読み込んでマージする
-    // ここでパスポートDBを開き、'StudentStatus' シートなどを読み取って liveData に反映させる処理を入れる予定
-    // Step 4で実装します。
-    
     const unitData = fetchSheetData(ss, DB_SCHEMA.UnitMaster.name).map(r => ({
       unitId: String(r[0]), taskId: String(r[1]), type: String(r[2]), title: String(r[3]),
       desc: String(r[4]), time: Number(r[5]), category: String(r[7]), step: String(r[8] || ''),
@@ -156,6 +183,7 @@ function getData() {
       unitInfo: safeJsonParse(r[14]), totalHours: Number(r[15] || 8)
     }));
 
+    // LiveStatusなどの全データ取得は初回ロード用
     const liveData = fetchSheetData(ss, DB_SCHEMA.LiveStatus.name).map(r => ({
       id: String(r[0]), name: String(r[1]), task: String(r[2]), mode: String(r[3]),
       time: r[4] ? formatDate(r[4]) : '', currentUnitId: String(r[5] || ''),
@@ -241,6 +269,35 @@ function getData() {
       })
     });
   } catch (e) { return createErrorResponse(e); }
+}
+
+/**
+ * [New] リアルタイムダッシュボード用：軽量データ取得API
+ * 全データを取得せず、LiveStatusのみを取得して返す
+ */
+function getLiveStatusSnapshot() {
+  try {
+    const ssId = PROPERTIES.getProperty('SS_ID');
+    if (!ssId) return createSuccessResponse({ live: [] });
+    const ss = SpreadsheetApp.openById(ssId);
+    
+    const liveData = fetchSheetData(ss, DB_SCHEMA.LiveStatus.name).map(r => ({
+      id: String(r[0]), 
+      name: String(r[1]), 
+      task: String(r[2]), 
+      mode: String(r[3]), // sos, focus, normal
+      time: r[4] ? formatDate(r[4]) : '', 
+      currentUnitId: String(r[5] || ''),
+      currentHour: Number(r[6] || 1), 
+      classId: String(r[7] || ''),
+      x: Number(r[8]) || 0, 
+      y: Number(r[9]) || 0
+    }));
+
+    return createSuccessResponse({ live: liveData });
+  } catch (e) {
+    return createErrorResponse(e);
+  }
 }
 
 function getStudentProgress(studentName, classId, currentUnitId) {
@@ -364,6 +421,74 @@ function updateStatus(studentName, taskId, taskTitle, status, mode, reflection, 
     }
     return createSuccessResponse();
   } catch (e) { return createErrorResponse(e); }
+}
+
+/**
+ * [New] Passportからの通知でLiveStatusを更新
+ * 既存のLiveStatusスキーマ: ['studentId', 'studentName', 'currentTask', 'mode', 'lastUpdate', 'currentUnitId', 'currentHour', 'classId', 'x', 'y']
+ */
+function updateLiveStatusFromPassport(data) {
+  const ss = getSpreadsheet();
+  const sheet = ss.getSheetByName(DB_SCHEMA.LiveStatus.name);
+  if (!sheet) return;
+
+  const dataValues = sheet.getDataRange().getValues();
+  const now = new Date();
+  
+  // Data from Passport: { studentId, studentName, taskId, taskTitle, mode, status }
+  const targetId = String(data.studentId);
+  const targetName = data.studentName;
+  
+  let rowIndex = -1;
+  
+  // 1. IDで検索 (Column 1 / Index 0)
+  for (let i = 1; i < dataValues.length; i++) {
+    if (String(dataValues[i][0]) === targetId) {
+      rowIndex = i + 1;
+      break;
+    }
+  }
+  
+  // 2. 名前で検索 (Fallback)
+  if (rowIndex === -1 && targetName) {
+    for (let i = 1; i < dataValues.length; i++) {
+      if (String(dataValues[i][1]) === targetName) {
+        rowIndex = i + 1;
+        break;
+      }
+    }
+  }
+
+  // データマッピング
+  const currentTask = data.taskTitle || data.taskId || "";
+  const mode = data.mode || (rowIndex > 0 ? dataValues[rowIndex-1][3] : "normal"); // 未指定なら維持
+  
+  if (rowIndex > 0) {
+    // 既存行を更新
+    sheet.getRange(rowIndex, 1).setValue(targetId); // ID補完
+    if (targetName) sheet.getRange(rowIndex, 2).setValue(targetName);
+    if (currentTask) sheet.getRange(rowIndex, 3).setValue(currentTask);
+    if (data.mode) sheet.getRange(rowIndex, 4).setValue(mode);
+    sheet.getRange(rowIndex, 5).setValue(now);
+    
+    // 他のカラム (unitId, hour, classId, x, y) は既存を維持
+    
+  } else {
+    // 新規行を追加
+    // [studentId, studentName, currentTask, mode, lastUpdate, currentUnitId, currentHour, classId, x, y]
+    sheet.appendRow([
+      targetId,
+      targetName || "Unknown",
+      currentTask,
+      mode,
+      now,
+      "", // currentUnitId
+      1,  // currentHour
+      "", // classId
+      0,  // x
+      0   // y
+    ]);
+  }
 }
 
 /**
