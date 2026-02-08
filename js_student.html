@@ -1,0 +1,1308 @@
+<script>
+/**
+ * 🧭 みらいコンパス Ver. 1.0 - Student Logic (児童用機能)
+ * ==============================================================================
+ * このファイルは、児童モード（学習者用画面）の動作を制御します。
+ * ・ログイン（名前選択）
+ * ・今日の学習リストの表示
+ * ・計画の作成（ドラッグ＆ドロップ）
+ * ・タスクの実行（完了・途中・メモ）
+ * ・ふりかえり、ポートフォリオ、自分用タイマー
+ */
+
+// ==========================================
+//  1. ログイン・初期表示 (Login & Entry)
+// ==========================================
+
+/**
+ * [画面描画] 名前入力（ログイン）画面を表示
+ */
+function renderNameEntry() {
+  let classOptions = '';
+  // クラスリストがあれば選択肢を作成
+  if (dataStore.classList.length > 0) {
+     classOptions = dataStore.classList.map(c => `<option value="${c}">${c}</option>`).join('');
+  } else {
+     classOptions = '<option value="1組">1組</option><option value="2組">2組</option>';
+  }
+
+  const container = document.getElementById('app-container');
+  container.innerHTML = `
+    <div class="row justify-content-center animate__animated animate__fadeIn">
+      <div class="col-md-6">
+        <div class="card shadow-sm p-5 text-center border-0 rounded-4">
+          <h4 class="fw-bold mb-4"><ruby>始<rt>はじ</rt></ruby>める</h4>
+          
+          <!-- クラス選択 -->
+          <div class="mb-3">
+             <label class="form-label small text-muted">クラス</label>
+             <select id="input-class" class="form-select form-select-lg text-center rounded-pill border-0 bg-light" onchange="updateNameSelect()">
+               ${classOptions}
+             </select>
+          </div>
+          
+          <!-- 名前選択 (クラスを選ぶと自動更新) -->
+          <div class="mb-4">
+             <label class="form-label small text-muted">なまえ</label>
+             <div id="name-input-container">
+               <input type="text" id="input-name" class="form-control form-control-lg text-center rounded-pill border-0 bg-light" placeholder="例：やまだ たろう">
+             </div>
+          </div>
+          
+          <!-- 次回省略チェック -->
+          <div class="form-check mb-4 d-inline-block">
+            <input class="form-check-input" type="checkbox" id="rm-me" checked>
+            <label class="form-check-label small" for="rm-me"><ruby>情報<rt>じょうほう</rt></ruby>を<ruby>保存<rt>ほぞん</rt></ruby>する</label>
+          </div>
+          
+          <button class="btn btn-primary btn-lg w-100 rounded-pill shadow-sm" onclick="handleLoginClick()">スタート</button>
+          
+          <div class="mt-4">
+             <button class="btn btn-link text-muted btn-sm" onclick="attemptTeacherLogin()">先生はこちら</button>
+          </div>
+        </div>
+      </div>
+    </div>`;
+    
+  updateNameSelect(); // 初期の名前リストを表示
+}
+
+/**
+ * [内部処理] クラス選択に合わせて名前リストを更新
+ * [改修] isActiveがfalse（転出など）の生徒は表示しない + 出席番号順にソート
+ */
+function updateNameSelect() {
+  const classVal = document.getElementById('input-class').value;
+  const container = document.getElementById('name-input-container');
+  
+  // 在籍中(isActive !== false)のみ抽出し、出席番号(number)順にソート
+  const students = dataStore.roster
+    .filter(r => r.classId === classVal && r.isActive !== false)
+    .sort((a,b) => a.number - b.number);
+
+  if (students.length > 0) {
+    const options = students.map(s => `<option value="${s.name}">${s.number}. ${s.name}</option>`).join('');
+    container.innerHTML = `
+      <select id="input-name" class="form-select form-select-lg text-center rounded-pill border-0 bg-light">
+        <option value="" disabled selected>名前をえらんでね</option>
+        ${options}
+      </select>`;
+  } else {
+    container.innerHTML = `<input type="text" id="input-name" class="form-control form-control-lg text-center rounded-pill border-0 bg-light" placeholder="例：やまだ たろう">`;
+  }
+}
+
+/**
+ * [アクション] スタートボタンクリック時
+ */
+function handleLoginClick() {
+  const nameInput = document.getElementById('input-name');
+  const classInput = document.getElementById('input-class');
+  const remember = document.getElementById('rm-me').checked;
+  
+  const name = nameInput.value.trim();
+  const cls = classInput.value;
+  
+  if (!name) return; // 名前が空なら何もしない
+  
+  // ブラウザに情報を保存（次回省略用）
+  if (remember) {
+    localStorage.setItem(CONSTANTS.LS_KEY_NAME, name);
+    localStorage.setItem(CONSTANTS.LS_KEY_CLASS, cls);
+  } else {
+    localStorage.removeItem(CONSTANTS.LS_KEY_NAME);
+    localStorage.removeItem(CONSTANTS.LS_KEY_CLASS);
+  }
+  
+  // アプリ状態を更新してログイン処理へ
+  appState.user.name = name;
+  appState.user.classId = cls;
+  loginStudent(false);
+}
+
+/**
+ * [サーバー通信] 生徒としてログインし、自分のデータを取得
+ * @param {boolean} isAuto - 自動ログインかどうか（ローディング表示の制御用）
+ */
+function loginStudent(isAuto) {
+  if (!isAuto) showLoading();
+  
+  // サーバー(Code.gs)の getStudentProgress を呼び出し
+  google.script.run
+    .withSuccessHandler(res => {
+      if (res.success) {
+        const d = JSON.parse(res.json);
+        
+        // サーバーから受け取った個人データを格納
+        dataStore.studentProgress = d.progress || {};
+        dataStore.studentFeedback = d.feedback || {};
+        dataStore.myTasks = d.myTasks || []; // 自分の「マイタスク」
+        dataStore.portfolioData = d.portfolio || { summary: '' };
+        dataStore.studentReflections = d.reflections?.[appState.unit.id] || {};
+        
+        // 学習計画データ
+        if (d.plans && d.plans[appState.unit.id]) {
+           dataStore.clsPlans[appState.user.name] = { [appState.unit.id]: d.plans[appState.unit.id] };
+        }
+        
+        syncStudentPlan();      // 計画データの整合性チェック
+        renderStudentView();    // 画面描画
+        
+        if (!isAuto) hideLoading();
+        
+        // 追加機能の起動
+        renderMyTimer();        // タイマーウィジェット表示
+        checkScheduleAndNotify(); // スケジュール確認
+        unlockAudio();          // 音声再生準備
+      }
+    })
+    .withFailureHandler(handleError)
+    .getStudentProgress(appState.user.name, appState.user.classId, appState.unit.id);
+}
+
+// ==========================================
+//  2. 画面描画制御 (View Controller)
+// ==========================================
+
+/**
+ * [機能] 生徒画面の描画振り分け
+ * 「今日の学習(daily)」か「計画作成(planning)」かを判断して描画します。
+ */
+function renderStudentView() { 
+  if (appState.view.student === 'planning') {
+    renderStudentPlanning(); 
+  } else {
+    renderStudentDaily(); 
+  }
+}
+
+/**
+ * [画面描画] モード切替（計画 ⇔ 今日）
+ */
+function setStudentViewMode(mode) { 
+  appState.view.student = mode; 
+  renderStudentView(); 
+}
+
+/**
+ * [画面描画] 現在の時数を変更（1時間目、2時間目...）
+ */
+function changeCurrentHour(h) { 
+  appState.unit.currentHour = parseInt(h); 
+  renderStudentView(); 
+}
+
+// ==========================================
+//  3. 今日の学習画面 (Daily View)
+// ==========================================
+
+function renderStudentDaily() {
+  const container = document.getElementById('app-container');
+  
+  // 自分のステータス（SOSなど）取得
+  const myStat = dataStore.liveStatus.find(d => d.name === appState.user.name) || { mode: '通常' };
+  
+  // 表示するタスクの抽出
+  const currentTasks = getCurrentUnitTasks();
+  const myTasksFiltered = dataStore.myTasks.filter(t => t.unitId === appState.unit.id);
+  const allTasks = [...currentTasks, ...myTasksFiltered];
+  
+  // 計画データの並び順を正としてタスクリストを構築する
+  const hourKey = String(appState.unit.currentHour);
+  const plannedIds = dataStore.studentPlan[hourKey] || [];
+  
+  // 表示用タスクリスト
+  let todaysTasks = [];
+  
+  // 1. 計画にあるタスクを「順序通り」に追加
+  plannedIds.forEach(tid => {
+    const t = allTasks.find(at => at.taskId === tid);
+    if (t) todaysTasks.push(t);
+  });
+
+  // 2. 計画に含まれていない「先生固定タスク」があれば先頭に追加 (未計画時の対応)
+  const fixedTasks = allTasks.filter(t => t.format === 'teacher' && getStepNumber(t.step) === appState.unit.currentHour);
+  fixedTasks.forEach(ft => {
+    // まだリストに含まれていなければ先頭に追加
+    if (!todaysTasks.some(t => t.taskId === ft.taskId)) {
+       todaysTasks.unshift(ft);
+    }
+  });
+  
+  // 合計時間を計算
+  let totalTime = 0; 
+  todaysTasks.forEach(t => totalTime += t.time);
+  
+  // 進捗バーの設定
+  const timePercent = Math.min((totalTime / CONSTANTS.UNIT_TIME) * 100, 100);
+  let timeColor = totalTime > CONSTANTS.UNIT_TIME ? 'bg-danger' : (totalTime > CONSTANTS.UNIT_TIME * 0.8 ? 'bg-warning' : 'bg-success');
+  
+  // タスクリストHTML生成
+  let taskListHtml = todaysTasks.length === 0 
+    ? `<div class="text-center py-5 text-muted"><p>計画が入っていません</p><button class="btn btn-outline-primary rounded-pill" onclick="setStudentViewMode('planning')">計画を立てる</button></div>` 
+    : todaysTasks.map(t => createStudentTaskCard(t)).join('');
+  
+  // 時数選択肢の生成
+  const effectiveHours = getEffectiveTotalHours();
+  let hourOptions = ''; 
+  for(let i = 1; i <= effectiveHours; i++) { 
+    hourOptions += `<option value="${i}" ${i === appState.unit.currentHour ? 'selected' : ''}>第${i}時</option>`; 
+  }
+  
+  // ステータスバッジ（SOSなど）
+  let stBadge = ''; let rstBtn = 'd-none';
+  if (myStat.mode === 'たすけて' || myStat.mode === 'sos') { 
+    stBadge = `<span class="badge bg-danger rounded-pill px-2 py-1 me-2 animate__animated animate__flash">SOS</span>`; rstBtn = ''; 
+  } else if (myStat.mode === 'しゅうちゅう' || myStat.mode === 'focus') { 
+    stBadge = `<span class="badge bg-info text-white rounded-pill px-2 py-1 me-2 animate__animated animate__pulse">集中</span>`; rstBtn = ''; 
+  }
+  
+  // 単元の目標表示
+  const currentUnit = appState.unitList.find(u => u.id === appState.unit.id) || {};
+  const goalHtml = currentUnit.goal 
+    ? `<div class="alert alert-success border-0 shadow-sm d-flex align-items-center py-2 px-3 mb-3 small">
+         <i class="bi bi-flag-fill text-success me-2 fs-5"></i>
+         <div class="fw-bold flex-grow-1">${currentUnit.goal}</div>
+       </div>` : '';
+
+  // メイン画面のHTML構築
+  container.innerHTML = `
+    ${goalHtml}
+    <!-- タイムライン・進捗バー -->
+    <div class="timeline-container shadow-sm p-3 mb-3 rounded-bottom border-bottom">
+      <div class="d-flex justify-content-between align-items-center mb-2">
+        <select class="form-select form-select-sm w-auto fw-bold text-primary border-0 bg-transparent" onchange="changeCurrentHour(this.value)">${hourOptions}</select>
+        <div class="small fw-bold ${totalTime > CONSTANTS.UNIT_TIME ? 'text-danger' : 'text-muted'}">${totalTime} / ${CONSTANTS.UNIT_TIME}分</div>
+      </div>
+      <div class="progress" style="height: 1.5rem;">
+        <div class="progress-bar progress-bar-striped ${timeColor}" role="progressbar" style="width: ${timePercent}%"></div>
+      </div>
+    </div>
+    
+    <div class="px-2">
+      <!-- ユーザー情報とツールボタン -->
+      <div class="d-flex justify-content-between align-items-center mb-3">
+        <div class="fw-bold text-primary me-2 text-truncate" style="max-width:150px;">
+          <i class="bi bi-person-circle me-1"></i>${appState.user.name} 
+          <span class="badge bg-light text-secondary border ms-1">${appState.user.classId}</span>
+        </div>
+        <div class="d-flex gap-2">
+          <!-- [追加] ギャラリーウォークボタン -->
+          <button class="btn btn-warning btn-sm rounded-pill text-dark" onclick="renderGalleryWalk()" title="みんなの計画を見る">
+            <i class="bi bi-grid-3x3-gap-fill"></i> みんな
+          </button>
+          
+          <button class="btn btn-outline-primary btn-sm rounded-pill" onclick="setStudentViewMode('planning')"><i class="bi bi-calendar-range"></i> <ruby>計画<rt>けいかく</rt></ruby></button>
+          <button class="btn btn-outline-secondary btn-sm rounded-pill" onclick="renderPortfolioModal('${appState.user.name}')"><i class="bi bi-journal-text"></i></button>
+          <button class="btn btn-outline-success btn-sm rounded-pill" onclick="openDailyReflectionModal()"><i class="bi bi-pencil-square"></i> ふりかえり</button>
+        </div>
+      </div>
+      
+      <!-- ステータスボタン (SOS/集中) -->
+      <div class="d-flex justify-content-end align-items-center mb-2">
+        ${stBadge}
+        <div class="d-flex gap-1">
+          <button class="btn btn-danger btn-sm rounded-pill px-3" onclick="submitUserStatus('たすけて')">SOS</button>
+          <button class="btn btn-info btn-sm rounded-pill px-3 text-white" onclick="submitUserStatus('しゅうちゅう')">集中</button>
+          <button class="btn btn-secondary btn-sm rounded-pill px-3 ${rstBtn}" onclick="submitUserStatus('通常')">解除</button>
+        </div>
+      </div>
+      
+      <!-- タスクリスト -->
+      ${taskListHtml}
+      
+      <div class="d-grid gap-2 mb-4 mt-3">
+        <button class="btn btn-outline-primary border-2 border-dashed py-3 rounded-4" onclick="openMyTaskModal()">
+          <i class="bi bi-plus-circle-fill me-2"></i>じぶんの<ruby>課題<rt>かだい</rt></ruby>
+        </button>
+      </div>
+    </div>`;
+}
+
+/**
+ * [HTML生成] タスクカード1枚分のHTMLを作成
+ */
+function createStudentTaskCard(t) {
+  const prog = dataStore.studentProgress[t.taskId] || {};
+  const stamp = dataStore.studentFeedback[t.taskId];
+  const isDone = prog.status === '完了'; 
+  const isDoing = prog.status === '途中';
+  
+  // ロック判定（前提タスクが終わっていない場合）
+  let isLocked = false;
+  if (t.prerequisites && t.prerequisites.length > 0) {
+    const allPreDone = t.prerequisites.every(pid => (dataStore.studentProgress[pid] && dataStore.studentProgress[pid].status === '完了'));
+    if (!allPreDone) isLocked = true;
+  }
+  
+  const cardClass = isLocked ? 'card-locked' : '';
+  const borderClass = getCategoryColorClass(t.category);
+  
+  // 先生からのスタンプ表示
+  let stampHtml = stamp ? `<div class="stamp-badge animate__animated animate__bounceIn">${{'check':'✅','good':'👍','great':'💮','support':'🚩'}[stamp]||''}</div>` : '';
+  
+  // Passportボタン
+  let passportBtn = '';
+  if (t.format !== 'teacher' && t.category !== 'マイタスク' && appState.passportUrl) {
+    passportBtn = `<button class="btn btn-primary rounded-pill px-3 btn-sm fw-bold me-1 shadow-sm" onclick="event.stopPropagation(); launchPassport('${t.taskId}')" title="みらいパスポートで学習する"><i class="bi bi-rocket-takeoff-fill"></i></button>`;
+  }
+
+  // アクションボタン（完了/途中/Passport）
+  let actionBtn = '';
+  if (isDone) { 
+    actionBtn = `<button class="btn btn-secondary rounded-pill px-3 btn-sm fw-bold" disabled>完了</button>`; 
+  } else {
+    const doingBtn = isDoing ? 'btn-warning text-dark' : 'btn-outline-warning text-dark';
+    let buttons = `<button class="btn btn-outline-success rounded-pill px-3 btn-sm fw-bold" onclick="event.stopPropagation(); submitTaskProgress('${t.taskId}','完了',this)">できた</button>`;
+    
+    if (t.format !== 'teacher') {
+       buttons = `<button class="btn ${doingBtn} rounded-pill px-3 btn-sm fw-bold me-1" onclick="event.stopPropagation(); submitTaskProgress('${t.taskId}','途中',this)">途中</button>` + buttons;
+       actionBtn = passportBtn + buttons;
+    } else {
+       actionBtn = buttons;
+    }
+  }
+  if (t.format === 'teacher') actionBtn = `<span class="badge bg-info text-white me-2">先生</span>` + actionBtn;
+
+  return `
+    <div class="card shadow-sm mb-3 card-task ${cardClass} ${borderClass} position-relative" style="cursor:pointer;" onclick="openTaskDetailModal('${t.taskId}')">
+      ${stampHtml}
+      ${isLocked ? `<div class="position-absolute top-50 start-50 translate-middle text-center" style="z-index:2"><i class="bi bi-lock-fill fs-1 text-secondary"></i><br><span class="badge bg-secondary">ロック中</span></div>` : ''}
+      <div class="card-body">
+        <div class="d-flex justify-content-end align-items-center mb-2">
+           <div class="text-end"><span class="badge bg-light text-secondary border">${t.time}分</span></div>
+        </div>
+        <h5 class="fw-bold mb-2">${t.title}</h5>
+        <div class="d-flex justify-content-between align-items-center mt-1">
+          <span class="badge bg-light text-secondary border rounded-pill" style="font-size:0.6rem">${t.category}</span>
+          <div class="text-end">${actionBtn}</div>
+        </div>
+      </div>
+    </div>`;
+}
+
+// ==========================================
+//  4.5 ギャラリーウォーク (Gallery Walk)
+// ==========================================
+
+let isGalleryAnonymous = true; // デフォルトは匿名
+
+function renderGalleryWalk() {
+  const container = document.getElementById('app-container');
+  const unitId = appState.unit.id;
+  const currentTasks = getCurrentUnitTasks();
+  const allTasks = [...currentTasks, ...dataStore.myTasks]; // マイタスクも含める
+  
+  // クラス全員の計画データを取得
+  // dataStore.clsPlans = { "生徒名": { "unitId": { "1": [ids], "2": [ids]... } } }
+  // dataStore.roster をベースにすることで、計画未作成の子も表示する
+  
+  // 現在のクラスの生徒リスト
+  const students = dataStore.roster.filter(r => r.classId === appState.user.classId).sort((a,b) => a.number - b.number);
+  
+  let cardsHtml = '';
+  
+  students.forEach((s, idx) => {
+    // 自分はスキップ（自分の画面で見ているので）
+    if (s.name === appState.user.name) return;
+
+    const displayName = isGalleryAnonymous ? `おともだち ${s.number}` : s.name;
+    const plan = (dataStore.clsPlans[s.name] && dataStore.clsPlans[s.name][unitId]) ? dataStore.clsPlans[s.name][unitId] : null;
+    
+    let planContentHtml = '';
+    
+    if (!plan) {
+      planContentHtml = `<div class="text-center text-muted small py-4">まだ計画がありません</div>`;
+    } else {
+      // 1時間目～総時数までの計画を可視化
+      const totalHours = appState.unit.totalHours; // 共通時数を使用
+      for (let h = 1; h <= totalHours; h++) {
+        const taskIds = plan[String(h)] || [];
+        let blocksHtml = '';
+        
+        taskIds.forEach(tid => {
+          const t = allTasks.find(at => at.taskId === tid);
+          if (t) {
+            // カテゴリごとの色クラス
+            let colorClass = 'bg-other';
+            if (t.category.includes('まなぶ')) colorClass = 'bg-manabu';
+            else if (t.category.includes('ふかめる')) colorClass = 'bg-fukameru';
+            else if (t.category.includes('まとめる')) colorClass = 'bg-matomeru';
+            else if (t.category === 'マイタスク') colorClass = 'bg-mytask';
+            
+            blocksHtml += `<div class="mini-task-block ${colorClass}" data-title="${t.title}"></div>`;
+          }
+        });
+        
+        if (blocksHtml === '') blocksHtml = `<div class="w-100 text-center text-muted" style="font-size:0.6rem; background:#f8f9fa;">-</div>`;
+
+        planContentHtml += `
+          <div class="mini-timeline-row">
+            <div class="mini-timeline-label">${h}</div>
+            <div class="mini-timeline-track">${blocksHtml}</div>
+          </div>`;
+      }
+    }
+
+    cardsHtml += `
+      <div class="col-6 col-md-4 col-lg-3">
+        <div class="card gallery-card h-100 shadow-sm border-0 rounded-3">
+          <div class="card-header bg-white border-bottom-0 pt-3 pb-1">
+            <div class="d-flex align-items-center">
+              <div class="rounded-circle bg-light text-secondary d-flex align-items-center justify-content-center me-2 fw-bold small" style="width:32px; height:32px;">
+                ${s.number}
+              </div>
+              <div class="fw-bold text-truncate text-secondary small">${displayName}</div>
+            </div>
+          </div>
+          <div class="card-body px-2 py-2">
+            ${planContentHtml}
+          </div>
+        </div>
+      </div>
+    `;
+  });
+
+  const anonBtnText = isGalleryAnonymous ? '<i class="bi bi-eye"></i> 名前をみる' : '<i class="bi bi-eye-slash"></i> 名前をかくす';
+  const anonBtnClass = isGalleryAnonymous ? 'btn-outline-secondary' : 'btn-secondary';
+
+  container.innerHTML = `
+    <div class="d-flex flex-column h-100 p-2">
+      <!-- ヘッダー -->
+      <div class="d-flex justify-content-between align-items-center mb-3">
+        <h5 class="fw-bold m-0 text-primary"><i class="bi bi-grid-3x3-gap-fill me-2"></i>みんなの計画</h5>
+        <div class="d-flex gap-2">
+          <button class="btn ${anonBtnClass} btn-sm rounded-pill" onclick="toggleGalleryNames()">${anonBtnText}</button>
+          <button class="btn btn-outline-primary btn-sm rounded-pill" onclick="setStudentViewMode('daily')">戻る</button>
+        </div>
+      </div>
+      
+      <!-- 凡例 -->
+      <div class="d-flex gap-3 mb-3 small text-muted justify-content-center flex-wrap">
+        <div class="d-flex align-items-center"><span class="d-inline-block rounded-circle me-1 bg-manabu" style="width:10px;height:10px;"></span>まなぶ</div>
+        <div class="d-flex align-items-center"><span class="d-inline-block rounded-circle me-1 bg-fukameru" style="width:10px;height:10px;"></span>ふかめる</div>
+        <div class="d-flex align-items-center"><span class="d-inline-block rounded-circle me-1 bg-matomeru" style="width:10px;height:10px;"></span>まとめる</div>
+        <div class="d-flex align-items-center"><span class="d-inline-block rounded-circle me-1 bg-mytask" style="width:10px;height:10px;"></span>マイタスク</div>
+      </div>
+
+      <!-- ギャラリー -->
+      <div class="overflow-auto flex-grow-1">
+        <div class="row g-3 pb-5">
+          ${cardsHtml}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function toggleGalleryNames() {
+  isGalleryAnonymous = !isGalleryAnonymous;
+  renderGalleryWalk();
+
+  const container = document.getElementById('app-container');
+  container.innerHTML = `
+    <div class="row justify-content-center animate__animated animate__fadeIn">
+      <div class="col-md-6">
+        <div class="card shadow-sm p-5 text-center border-0 rounded-4">
+          <h4 class="fw-bold mb-4"><ruby>始<rt>はじ</rt></ruby>める</h4>
+          <div class="mb-3">
+             <label class="form-label small text-muted">クラス</label>
+             <select id="input-class" class="form-select form-select-lg text-center rounded-pill border-0 bg-light" onchange="updateNameSelect()">
+               ${classOptions}
+             </select>
+          </div>
+          <div class="mb-4">
+             <label class="form-label small text-muted">なまえ</label>
+             <div id="name-input-container">
+               <input type="text" id="input-name" class="form-control form-control-lg text-center rounded-pill border-0 bg-light" placeholder="例：やまだ たろう">
+             </div>
+          </div>
+          <div class="form-check mb-4 d-inline-block">
+            <input class="form-check-input" type="checkbox" id="rm-me" checked>
+            <label class="form-check-label small" for="rm-me"><ruby>情報<rt>じょうほう</rt></ruby>を<ruby>保存<rt>ほぞん</rt></ruby>する</label>
+          </div>
+          <button class="btn btn-primary btn-lg w-100 rounded-pill shadow-sm" onclick="handleLoginClick()">スタート</button>
+          <div class="mt-4">
+             <button class="btn btn-link text-muted btn-sm" onclick="attemptTeacherLogin()">先生はこちら</button>
+          </div>
+        </div>
+      </div>
+    </div>`;
+    
+  updateNameSelect();
+}
+
+/**
+ * [内部処理] クラス選択に合わせて名前リストを更新
+ * [改修] isActiveがfalse（転出など）の生徒は表示しない + 出席番号順にソート
+ */
+function updateNameSelect() {
+  const classVal = document.getElementById('input-class').value;
+  const container = document.getElementById('name-input-container');
+  
+  // 在籍中(isActive !== false)のみ抽出し、出席番号(number)順にソート
+  const students = dataStore.roster
+    .filter(r => r.classId === classVal && r.isActive !== false)
+    .sort((a,b) => a.number - b.number);
+
+  if (students.length > 0) {
+    const options = students.map(s => `<option value="${s.name}">${s.number}. ${s.name}</option>`).join('');
+    container.innerHTML = `
+      <select id="input-name" class="form-select form-select-lg text-center rounded-pill border-0 bg-light">
+        <option value="" disabled selected>名前をえらんでね</option>
+        ${options}
+      </select>`;
+  } else {
+    container.innerHTML = `<input type="text" id="input-name" class="form-control form-control-lg text-center rounded-pill border-0 bg-light" placeholder="例：やまだ たろう">`;
+  }
+}
+
+// ==========================================
+//  5. 計画作成画面 (Planning View)
+// ==========================================
+
+function renderStudentPlanning() {
+  // スクロール位置の保存（再描画時にガタつかないように）
+  const scrollContainer = document.getElementById('planning-scroll-view');
+  const scrollY = scrollContainer ? scrollContainer.scrollTop : 0;
+  
+  const poolContainer = document.getElementById('task-pool-container'); 
+  const poolScrollY = poolContainer ? poolContainer.scrollTop : 0;
+
+  // タスクの整理
+  const currentTasks = getCurrentUnitTasks();
+  const myTasksFiltered = dataStore.myTasks.filter(t => t.unitId === appState.unit.id);
+  const allTasks = [...currentTasks, ...myTasksFiltered];
+  
+  // 【左側】タスクプール（選択肢）
+  let taskPoolHtml = `<div class="d-grid gap-2 mb-3 sticky-top bg-white pt-2 pb-2 border-bottom" style="top:0; z-index:5;"><button class="btn btn-outline-primary btn-sm rounded-pill border-dashed" onclick="openMyTaskModal()"><i class="bi bi-plus-lg me-1"></i><ruby>課題<rt>かだい</rt></ruby>作成</button></div>`;
+  
+  allTasks.filter(t => t.format !== 'teacher').forEach(t => { 
+    const borderClass = getCategoryColorClass(t.category);
+    taskPoolHtml += `
+      <div class="card p-2 mb-2 shadow-sm task-draggable ${borderClass}" style="${t.category==='マイタスク'?'background-color:#fbf5ff;':''}" data-id="${t.taskId}" onclick="openTaskDetailModal('${t.taskId}')">
+        <div class="small fw-bold">${t.title}</div>
+        <div class="d-flex justify-content-between align-items-center mt-1">
+          <span class="badge bg-light text-secondary border rounded-pill" style="font-size:0.6rem">${t.category}</span>
+          <span class="x-small text-muted">${t.time}分</span>
+        </div>
+      </div>`; 
+  });
+  
+  // 【右側】時数ごとの計画表
+  const effectiveHours = getEffectiveTotalHours();
+  let hoursHtml = '';
+  
+  for(let i = 1; i <= effectiveHours; i++) {
+    let plannedTasksHtml = '';
+    const plannedIds = dataStore.studentPlan[String(i)] || [];
+    let hourTotalTime = 0;
+    
+    let displayTasks = [];
+    
+    // 計画済みのタスクを追加
+    plannedIds.forEach(tid => {
+      const t = allTasks.find(x => x.taskId === tid);
+      if (t) displayTasks.push(t);
+    });
+
+    // 先生タスク（固定）を自動挿入
+    const fixedTasks = allTasks.filter(t => t.format === 'teacher' && getStepNumber(t.step) === i);
+    fixedTasks.forEach(ft => {
+      if (!displayTasks.some(t => t.taskId === ft.taskId)) {
+         displayTasks.unshift(ft);
+      }
+    });
+
+    displayTasks.forEach(t => {
+      hourTotalTime += t.time;
+      const borderClass = getCategoryColorClass(t.category);
+      const isTeacher = t.format === 'teacher';
+      const badge = isTeacher ? `<span class="badge bg-info text-white me-1" style="font-size:0.6em">固定</span>` : '';
+      const deleteBtn = isTeacher ? '' : `<i class="bi bi-x text-danger" style="cursor:pointer" onclick="event.stopPropagation(); removeFromPlan('${String(i)}', '${t.taskId}')"></i>`;
+      const bgStyle = t.category === 'マイタスク' ? 'background-color:#fbf5ff;' : (isTeacher ? 'opacity:0.9;' : '');
+      
+      plannedTasksHtml += `
+        <div class="card p-2 mb-2 shadow-sm task-draggable ${borderClass}" style="${bgStyle}" data-id="${t.taskId}" onclick="openTaskDetailModal('${t.taskId}')">
+          <div class="d-flex justify-content-between align-items-center">
+            <span class="small fw-bold text-truncate">${badge}${t.title}</span>
+            ${deleteBtn}
+          </div>
+          <div class="d-flex justify-content-between align-items-center mt-1">
+            <span class="badge bg-light text-secondary border rounded-pill" style="font-size:0.6rem">${t.category}</span>
+            <span class="x-small text-muted">${t.time}分</span>
+          </div>
+        </div>`;
+    });
+
+    // 時間配分の計算（色変化）
+    const timeRatio = Math.min(hourTotalTime / CONSTANTS.UNIT_TIME, 1) * 100;
+    const barColor = hourTotalTime > CONSTANTS.UNIT_TIME ? '#ffcdd2' : '#c8e6c9'; 
+    const headerStyle = `background: linear-gradient(90deg, ${barColor} ${timeRatio}%, #f8f9fa ${timeRatio}%);`;
+
+    hoursHtml += `
+      <div class="plan-hour-row mb-3">
+        <div class="plan-hour-header-v p-2 fw-bold text-center border rounded-top position-relative" style="${headerStyle}">
+          第${i}時 <span class="small ms-2 fw-normal badge bg-white text-dark border">${hourTotalTime}分</span>
+        </div>
+        <div class="plan-drop-zone-v p-2 border border-top-0 rounded-bottom" data-hour="${i}" style="min-height: 80px; background-color: #fff;">
+          ${plannedTasksHtml}
+        </div>
+      </div>`;
+  }
+
+  const container = document.getElementById('app-container');
+  container.innerHTML = `
+    <div class="p-3 d-flex flex-column h-100">
+      <div class="d-flex justify-content-between align-items-center mb-3 flex-shrink-0">
+        <div class="d-flex align-items-center">
+          <h5 class="fw-bold m-0 me-3"><i class="bi bi-calendar-range me-2 text-primary"></i><ruby>計画<rt>けいかく</rt></ruby>モード</h5>
+          <!-- 総時数の変更ボタン -->
+          <div class="input-group input-group-sm w-auto">
+            <span class="input-group-text bg-white">全</span>
+            <input type="text" class="form-control text-center fw-bold bg-white" value="${effectiveHours}" style="width:40px;" readonly>
+            <button class="btn btn-outline-secondary" onclick="changeStudentTotalHours(1)"><i class="bi bi-plus-lg"></i></button>
+            <button class="btn btn-outline-secondary" onclick="changeStudentTotalHours(-1)"><i class="bi bi-dash-lg"></i></button>
+          </div>
+        </div>
+        <button class="btn btn-primary rounded-pill px-4 shadow-sm" onclick="setStudentViewMode('daily')"><ruby>完了<rt>かんりょう</rt></ruby></button>
+      </div>
+      <div class="row flex-grow-1" style="min-height:0; height: calc(100vh - 150px);">
+        <!-- 左側：課題プール -->
+        <div class="col-4 h-100 border-end bg-white rounded-start d-flex flex-column">
+          <div class="small text-muted mb-2 flex-shrink-0 p-2 border-bottom">課題リスト</div>
+          <div id="task-pool-container" class="flex-grow-1 overflow-auto p-2"><div id="task-pool">${taskPoolHtml}</div></div>
+        </div>
+        <!-- 右側：計画表 -->
+        <div id="planning-scroll-view" class="col-8 h-100 overflow-auto">
+          <div class="plan-container-v h-100 pt-2">
+            ${hoursHtml}
+          </div>
+        </div>
+      </div>
+    </div>`;
+
+  // スクロール位置の復元
+  const newPoolContainer = document.getElementById('task-pool-container'); 
+  if (newPoolContainer) newPoolContainer.scrollTop = poolScrollY;
+
+  const newScrollContainer = document.getElementById('planning-scroll-view');
+  if (newScrollContainer) newScrollContainer.scrollTop = scrollY;
+  
+  // Sortable.js (ドラッグ＆ドロップ) の初期化
+  new Sortable(document.getElementById('task-pool'), { group: { name: 'shared', pull: 'clone', put: false }, sort: false, animation: 150 });
+  
+  document.querySelectorAll('.plan-drop-zone-v').forEach(el => {
+    new Sortable(el, {
+      group: 'shared',
+      sort: true,
+      animation: 150,
+      draggable: ".task-draggable", 
+      onAdd: function (evt) {
+        const hour = String(evt.to.getAttribute('data-hour'));
+        const newOrder = this.toArray(); 
+        updatePlanByOrder(hour, newOrder);
+        setTimeout(() => renderStudentPlanning(), 0);
+      },
+      onUpdate: function (evt) {
+        const hour = String(evt.to.getAttribute('data-hour'));
+        const newOrder = this.toArray();
+        updatePlanByOrder(hour, newOrder);
+      },
+      onRemove: function (evt) {
+        const hour = String(evt.from.getAttribute('data-hour'));
+        const newOrder = this.toArray(); 
+        updatePlanByOrder(hour, newOrder);
+      }
+    });
+  });
+}
+
+// ------------------------------------
+//  計画操作ロジック
+// ------------------------------------
+
+// 計画データの並び順を更新して保存
+function updatePlanByOrder(hour, newOrderArray) {
+  dataStore.studentPlan[hour] = newOrderArray;
+  savePlan();
+}
+
+// 計画からタスクを削除
+function removeFromPlan(hour, taskId) { 
+  if (dataStore.studentPlan[hour]) { 
+    dataStore.studentPlan[hour] = dataStore.studentPlan[hour].filter(id => id !== taskId); 
+    savePlan(); 
+    renderStudentPlanning(); 
+  } 
+}
+
+// サーバーへ計画を保存
+function savePlan() {
+  google.script.run
+    .withFailureHandler(handleError)
+    .saveStudentPlan(appState.user.name, appState.unit.id, dataStore.studentPlan, appState.user.classId);
+}
+
+// 生徒の学習計画用：総時数の変更
+function getEffectiveTotalHours() {
+  if (dataStore.studentPlan._meta && dataStore.studentPlan._meta.totalHours) {
+    return parseInt(dataStore.studentPlan._meta.totalHours);
+  }
+  return appState.unit.totalHours;
+}
+
+function changeStudentTotalHours(delta) {
+  const current = getEffectiveTotalHours();
+  const next = current + delta;
+  if (next < 1) return;
+
+  if (!dataStore.studentPlan._meta) dataStore.studentPlan._meta = {};
+  dataStore.studentPlan._meta.totalHours = next;
+  
+  savePlan(); 
+  renderStudentPlanning(); 
+}
+
+// 計画データの同期（初期化）
+function syncStudentPlan() { 
+  const plans = dataStore.clsPlans[appState.user.name] || {}; 
+  const currentPlan = plans[appState.unit.id] || {}; 
+  
+  if (!currentPlan._meta) {
+    currentPlan._meta = {}; 
+  }
+
+  const total = currentPlan._meta.totalHours || appState.unit.totalHours;
+  for (let i = 1; i <= total; i++) { 
+    if (!currentPlan[String(i)]) currentPlan[String(i)] = []; 
+  } 
+  dataStore.studentPlan = currentPlan; 
+}
+
+// ==========================================
+//  6. タスクアクション (Progress & Status)
+// ==========================================
+
+/**
+ * [アクション] 課題の進捗を更新（できた・途中）
+ */
+function submitTaskProgress(taskId, status, btnElement) {
+  if (status === '完了') {
+    btnElement.className = "btn btn-secondary rounded-pill px-4 btn-sm fw-bold animate__animated animate__heartBeat";
+    btnElement.innerHTML = `<i class="bi bi-check-circle-fill me-1"></i><ruby>完了<rt>かんりょう</rt></ruby>`; 
+    btnElement.disabled = true;
+  }
+  if (!dataStore.studentProgress[taskId]) dataStore.studentProgress[taskId] = {};
+  dataStore.studentProgress[taskId].status = status;
+  
+  const allTasks = [...dataStore.masterTasks, ...dataStore.myTasks];
+  const t = allTasks.find(x => x.taskId === taskId);
+  const mem = dataStore.studentProgress[taskId].reflection || "";
+  
+  // サーバーへ送信
+  google.script.run
+    .withFailureHandler(err => console.error(err))
+    .updateStatus(appState.user.name, t.taskId, t.title, status, '通常', mem, appState.user.classId, appState.unit.id);
+  
+  if (status === '途中') showToast('info', '途中経過を保存しました');
+  if (status === '完了') setTimeout(renderStudentView, 1000); // 1秒後に画面更新
+}
+
+/**
+ * [アクション] 自分のステータス変更（SOS/集中）
+ */
+function submitUserStatus(mode) {
+  const idx = dataStore.liveStatus.findIndex(d => d.name === appState.user.name);
+  if (idx >= 0) {
+    dataStore.liveStatus[idx].mode = (mode === '通常' ? '' : mode);
+    dataStore.liveStatus[idx].classId = appState.user.classId;
+    dataStore.liveStatus[idx].currentUnitId = appState.unit.id;
+  }
+  renderStudentView();
+  
+  let msg = "ステータス解除"; let icon = "success";
+  if (mode === 'たすけて' || mode === 'sos') { msg = "SOS送信！"; icon = "warning"; }
+  else if (mode === 'しゅうちゅう' || mode === 'focus') { msg = "集中モード開始"; icon = "info"; }
+  
+  if (mode !== '通常' && mode !== '') showToast(icon, msg);
+  
+  google.script.run
+    .withFailureHandler(err => console.error(err))
+    .updateStatus(appState.user.name, 'st_upd', 'ステータス', '更新', mode, '', appState.user.classId, appState.unit.id);
+}
+
+// ==========================================
+//  7. モーダル機能 (Modals)
+// ==========================================
+
+/**
+ * [モーダル] タスク詳細・ふりかえり入力
+ */
+function openTaskDetailModal(taskId) {
+  const allTasks = [...dataStore.masterTasks, ...dataStore.myTasks];
+  const t = allTasks.find(x => x.taskId === taskId);
+  if (!t) return;
+
+  const mem = (dataStore.studentProgress[taskId] || {}).reflection || "";
+
+  // 教材リンクのHTML生成（JSONパース処理はヘルパー関数を使用）
+  const parseMat = (str) => { try { return JSON.parse(str||'{}'); } catch(e){ return {name:str,url:''}; } };
+  const materials = [
+    { type: 'textbook', label: '教科書・資料', icon: 'bi-book', data: parseMat(t.textbook) },
+    { type: 'tablet', label: 'タブレット・アプリ', icon: 'bi-tablet', data: parseMat(t.tablet) },
+    { type: 'print', label: 'プリント・その他', icon: 'bi-file-earmark-text', data: parseMat(t.print) }
+  ];
+
+  let materialHtml = '';
+  materials.forEach(m => {
+    if (m.data && m.data.name) {
+      if (m.data.url) {
+        materialHtml += `<a href="${m.data.url}" target="_blank" class="btn btn-outline-primary btn-sm w-100 mb-2 text-start text-truncate fw-bold"><i class="bi ${m.icon} me-2"></i>${m.data.name}</a>`;
+      } else {
+        materialHtml += `<div class="mb-2 text-truncate"><span class="badge bg-light text-dark border me-2"><i class="bi ${m.icon}"></i> ${m.label}</span><span class="small">${m.data.name}</span></div>`;
+      }
+    }
+  });
+
+  // みらいパスポート起動ボタン
+  let passportLauncherHtml = '';
+  if (t.format !== 'teacher' && t.category !== 'マイタスク' && appState.passportUrl) {
+    passportLauncherHtml = `
+      <div class="mt-4 pt-3 border-top text-center">
+        <button class="btn btn-outline-primary rounded-pill w-100 fw-bold shadow-sm" onclick="launchPassport('${taskId}')">
+          <i class="bi bi-rocket-takeoff-fill me-2"></i>みらいパスポートで学習する
+        </button>
+        <div class="x-small text-muted mt-1">※別タブでワークシートが開きます</div>
+      </div>`;
+  }
+
+  Swal.fire({
+    title: t.title,
+    html: `
+      <div class="text-start">
+        <p class="small bg-light p-2 rounded mb-3">${t.desc || ""}</p>
+        ${materialHtml ? '<div class="mb-3 border p-2 rounded bg-white"><div class="small fw-bold text-primary mb-2"><i class="bi bi-link-45deg"></i> 学習リンク</div>' + materialHtml + '</div>' : ''}
+        <label class="form-label fw-bold small">メモ（気づき・わかったこと）</label>
+        <textarea id="ref-txt" class="form-control" rows="3" placeholder="ここに記録を残せます">${mem}</textarea>
+        ${passportLauncherHtml}
+      </div>
+    `,
+    showCancelButton: true,
+    confirmButtonText: '保存',
+    confirmButtonColor: '#1a73e8'
+  }).then(r => {
+    if (r.isConfirmed) {
+      const txt = document.getElementById('ref-txt').value;
+      if (txt !== mem) {
+        if (!dataStore.studentProgress[taskId]) dataStore.studentProgress[taskId] = {};
+        dataStore.studentProgress[taskId].reflection = txt;
+        const curStatus = dataStore.studentProgress[taskId].status || '未着手';
+        google.script.run.updateStatus(appState.user.name, t.taskId, t.title, curStatus, '通常', txt, appState.user.classId, appState.unit.id);
+        showToast('success', 'メモを保存しました');
+      }
+    }
+  });
+}
+
+/**
+ * [モーダル] 毎時間のふりかえり入力
+ */
+function openDailyReflectionModal(targetHour = null) {
+  const hourToEdit = targetHour || appState.unit.currentHour;
+  let ref = { achievement: 'A', comment: '', skills: [] };
+  
+  if (dataStore.studentReflections && dataStore.studentReflections[hourToEdit]) {
+    ref = dataStore.studentReflections[hourToEdit];
+  }
+
+  // スキル選択ボタンの生成
+  const skillButtons = SKILL_DEFINITIONS.map(s => {
+    const isChecked = ref.skills && ref.skills.includes(s.id);
+    return `
+      <div class="col-3 col-md-3 mb-2">
+        <input type="checkbox" class="btn-check skill-check" id="skill-${s.id}" value="${s.id}" ${isChecked ? 'checked' : ''}>
+        <label class="btn btn-outline-${s.color} w-100 rounded-pill btn-sm py-2" for="skill-${s.id}">
+          <div class="small fw-light" style="font-size:0.7rem">${s.group}</div>
+          <div class="fw-bold">${s.label}</div>
+        </label>
+      </div>`;
+  }).join('');
+
+  Swal.fire({
+    title: `<div class="fs-4 fw-bold">第${hourToEdit}時のふりかえり</div>`,
+    html: `
+      <div class="text-start">
+        <div class="mb-4">
+          <label class="form-label small fw-bold text-muted"><ruby>達成度<rt>たっせいど</rt></ruby></label>
+          <div class="btn-group w-100" role="group">
+            <input type="radio" class="btn-check" name="ach-btn" id="ach-a" value="A" ${ref.achievement==='A'?'checked':''}>
+            <label class="btn btn-outline-primary" for="ach-a">◎ <ruby>計画<rt>けいかく</rt></ruby>通り</label>
+            <input type="radio" class="btn-check" name="ach-btn" id="ach-b" value="B" ${ref.achievement==='B'?'checked':''}>
+            <label class="btn btn-outline-primary" for="ach-b">〇 まあまあ</label>
+            <input type="radio" class="btn-check" name="ach-btn" id="ach-c" value="C" ${ref.achievement==='C'?'checked':''}>
+            <label class="btn btn-outline-primary" for="ach-c">△ あまり</label>
+          </div>
+        </div>
+
+        <div class="mb-4">
+          <label class="form-label small fw-bold text-muted">今日<ruby>発揮<rt>はっき</rt></ruby>した<ruby>力<rt>ちから</rt></ruby>（複数選択可）</label>
+          <div class="row gx-2">
+            ${skillButtons}
+          </div>
+        </div>
+
+        <div>
+          <label class="form-label small fw-bold text-muted">ひとことコメント</label>
+          <textarea id="rf-com" class="form-control bg-light border-0" rows="3" placeholder="わかったこと、次がんばりたいこと">${ref.comment||''}</textarea>
+        </div>
+      </div>
+    `,
+    width: '600px',
+    showCancelButton: true,
+    confirmButtonText: '記録する',
+    confirmButtonColor: '#1a73e8',
+    customClass: { popup: 'rounded-5' },
+    preConfirm: () => {
+      const achEl = document.querySelector('input[name="ach-btn"]:checked');
+      if (!achEl) { Swal.showValidationMessage('達成度を選択してください'); return false; }
+      
+      const skills = Array.from(document.querySelectorAll('.skill-check:checked')).map(el => el.value);
+      return {
+        achievement: achEl.value,
+        comment: document.getElementById('rf-com').value,
+        skills: skills
+      };
+    }
+  }).then(r => {
+    if (r.isConfirmed) {
+      const v = r.value;
+      if(!dataStore.studentReflections) dataStore.studentReflections = {};
+      dataStore.studentReflections[hourToEdit] = v;
+
+      google.script.run.saveDailyReflection(appState.user.name, appState.unit.id, hourToEdit, v.achievement, v.comment, appState.user.classId, v.skills);
+      showToast('success', 'ふりかえりを記録しました');
+      renderStudentView(); // 更新
+    }
+  });
+}
+
+/**
+ * [モーダル] ポートフォリオ（単元のまとめ・グラフ）
+ */
+function renderPortfolioModal(name) {
+  const reflections = dataStore.studentReflections || {};
+  const summary = dataStore.portfolioData ? dataStore.portfolioData.summary : "";
+  const feedback = dataStore.portfolioData ? dataStore.portfolioData.feedback : "";
+  const stamp = dataStore.portfolioData ? dataStore.portfolioData.stamp : "";
+
+  // スキル集計
+  const skillCounts = {};
+  SKILL_DEFINITIONS.forEach(s => skillCounts[s.id] = 0);
+  Object.values(reflections).forEach(r => {
+    if (r.skills && Array.isArray(r.skills)) {
+      r.skills.forEach(sId => {
+        if (skillCounts[sId] !== undefined) skillCounts[sId]++;
+      });
+    }
+  });
+  const chartLabels = SKILL_DEFINITIONS.map(s => s.label);
+  const chartData = SKILL_DEFINITIONS.map(s => skillCounts[s.id]);
+  const maxVal = Math.max(5, ...chartData) + 1;
+
+  // タイムラインHTML
+  let timelineHtml = '<div class="timeline-wrapper ps-2 border-start border-3 ms-3">';
+  const sortedHours = Object.keys(reflections).map(Number).sort((a,b)=>a-b);
+  
+  if (sortedHours.length === 0) {
+    timelineHtml += '<div class="text-muted ms-3 small">まだふりかえりの記録がありません</div>';
+  } else {
+    sortedHours.forEach(h => {
+      const r = reflections[h];
+      const achIcon = r.achievement === 'A' ? '◎' : (r.achievement === 'B' ? '〇' : '△');
+      const achColor = r.achievement === 'A' ? 'text-primary' : (r.achievement === 'B' ? 'text-success' : 'text-secondary');
+      
+      let tagsHtml = '';
+      if(r.skills && r.skills.length > 0) {
+        tagsHtml = '<div class="mt-1">' + r.skills.map(sid => {
+          const def = SKILL_DEFINITIONS.find(d => d.id === sid);
+          return def ? `<span class="badge rounded-pill bg-light text-dark border me-1 small fw-normal">${def.label}</span>` : '';
+        }).join('') + '</div>';
+      }
+
+      timelineHtml += `
+        <div class="position-relative mb-4 ms-3">
+          <div class="position-absolute top-0 start-0 translate-middle rounded-circle bg-white border border-2" style="width:12px;height:12px;left:-22px!important;"></div>
+          <div class="small fw-bold text-muted mb-1 d-flex align-items-center">
+            第${h}時 <span class="${achColor} ms-2 fs-6">${achIcon}</span>
+            <i class="bi bi-pencil-square text-muted ms-2 cursor-pointer edit-icon" onclick="Swal.close(); setTimeout(() => openDailyReflectionModal(${h}), 300);"></i>
+          </div>
+          <div class="bg-light p-2 rounded small">${r.comment || 'コメントなし'}</div>
+          ${tagsHtml}
+        </div>`;
+    });
+  }
+  timelineHtml += '</div>';
+
+  // 先生からのフィードバック
+  let feedbackHtml = '';
+  if (feedback || stamp) {
+    const stampIcon = {'check':'✅','good':'👍','great':'💮','support':'🚩'}[stamp] || '';
+    feedbackHtml = `
+      <div class="mt-4 border p-3 rounded bg-white shadow-sm">
+        <div class="small fw-bold text-primary mb-2"><i class="bi bi-person-badge-fill me-1"></i>先生からのメッセージ</div>
+        <div class="d-flex align-items-start">
+          <div class="display-4 me-3">${stampIcon}</div>
+          <div class="flex-grow-1 bg-light p-2 rounded small text-dark">${feedback || '（コメントなし）'}</div>
+        </div>
+      </div>`;
+  }
+
+  Swal.fire({
+    title: `<div class="fs-4 fw-bold"><i class="bi bi-journal-text me-2"></i>ポートフォリオ</div>`,
+    html: `
+      <div class="container-fluid text-start px-0">
+        <ul class="nav nav-pills mb-3 justify-content-center" id="pills-tab" role="tablist">
+          <li class="nav-item"><button class="nav-link active rounded-pill px-4" id="pills-graph-tab" data-bs-toggle="pill" data-bs-target="#pills-graph" type="button">グラフ</button></li>
+          <li class="nav-item"><button class="nav-link rounded-pill px-4" id="pills-log-tab" data-bs-toggle="pill" data-bs-target="#pills-log" type="button">あゆみ</button></li>
+          <li class="nav-item"><button class="nav-link rounded-pill px-4" id="pills-sum-tab" data-bs-toggle="pill" data-bs-target="#pills-sum" type="button">まとめ</button></li>
+        </ul>
+        <div class="tab-content" id="pills-tabContent" style="min-height: 300px;">
+          <div class="tab-pane fade show active" id="pills-graph" role="tabpanel">
+            <div class="chart-container" style="position: relative; height:300px; width:100%">
+              <canvas id="skillRadarChart"></canvas>
+            </div>
+          </div>
+          <div class="tab-pane fade" id="pills-log" role="tabpanel">
+            <div style="max-height: 350px; overflow-y: auto;">${timelineHtml}</div>
+          </div>
+          <div class="tab-pane fade" id="pills-sum" role="tabpanel">
+             <div class="p-2">
+               <div class="small text-muted mb-2">この単元を通して学んだこと、できるようになったことを書きましょう。</div>
+               <textarea id="pf-summary" class="form-control bg-light border-0" rows="8" placeholder="ここにまとめを書こう...">${summary||''}</textarea>
+               <button class="btn btn-primary rounded-pill w-100 mt-3" onclick="saveSummary()"><ruby>保存<rt>ほぞん</rt></ruby>する</button>
+               ${feedbackHtml}
+             </div>
+          </div>
+        </div>
+      </div>`,
+    width: '650px',
+    showCloseButton: true,
+    showConfirmButton: false,
+    didOpen: () => {
+      // チャート描画
+      const ctx = document.getElementById('skillRadarChart').getContext('2d');
+      new Chart(ctx, {
+        type: 'radar',
+        data: {
+          labels: chartLabels,
+          datasets: [{
+            label: '発揮した力',
+            data: chartData,
+            backgroundColor: 'rgba(26, 115, 232, 0.2)',
+            borderColor: 'rgba(26, 115, 232, 1)',
+            pointBackgroundColor: 'rgba(26, 115, 232, 1)',
+            borderWidth: 2
+          }]
+        },
+        options: {
+          scales: {
+            r: {
+              angleLines: { display: true },
+              suggestedMin: 0,
+              suggestedMax: maxVal,
+              ticks: { stepSize: 1, backdropColor: 'transparent' }
+            }
+          },
+          plugins: { legend: { display: false } },
+          maintainAspectRatio: false
+        }
+      });
+    }
+  });
+}
+
+function saveSummary() {
+  const val = document.getElementById('pf-summary').value;
+  if(!dataStore.portfolioData) dataStore.portfolioData = {};
+  dataStore.portfolioData.summary = val;
+  google.script.run.savePortfolio(appState.user.name, appState.unit.id, val, appState.user.classId);
+  showToast('success', '保存しました');
+}
+
+/**
+ * [モーダル] じぶんの課題作成
+ */
+function openMyTaskModal() { 
+  Swal.fire({ 
+    title: 'じぶんの課題', 
+    html: `<div class="text-start"><label class="form-label small fw-bold">タイトル</label><input id="mt-title" class="form-control mb-3"><label class="form-label small fw-bold">めあて</label><textarea id="mt-desc" class="form-control mb-3" rows="2"></textarea><label class="form-label small fw-bold">時間</label><input id="mt-time" type="number" class="form-control" value="15"></div>`, 
+    showCancelButton: true, 
+    confirmButtonText: '追加', 
+    preConfirm: () => { 
+      const t = document.getElementById('mt-title').value; 
+      if (!t) Swal.showValidationMessage('タイトル必須'); 
+      return { title: t, desc: document.getElementById('mt-desc').value, time: document.getElementById('mt-time').value }; 
+    } 
+  }).then(r => { 
+    if (r.isConfirmed) { 
+      const v = r.value; 
+      google.script.run.withSuccessHandler((res) => { 
+        // サーバーから返されたIDを使用
+        const newId = (res && res.taskId) ? res.taskId : "MT_TEMP";
+        dataStore.myTasks.push({ 
+          taskId: newId, 
+          title: v.title, 
+          desc: v.desc, 
+          time: parseInt(v.time), 
+          category: 'マイタスク', 
+          type: 'challenge', 
+          format: 'student',
+          unitId: appState.unit.id
+        }); 
+        
+        if (appState.view.student === 'planning') {
+          renderStudentPlanning(); 
+        } else {
+          // Dailyビューの場合は、現在の時数に自動登録する
+          const currentHour = String(appState.unit.currentHour);
+          if (!dataStore.studentPlan[currentHour]) dataStore.studentPlan[currentHour] = [];
+          dataStore.studentPlan[currentHour].push(newId);
+          savePlan(); // 計画を保存
+          
+          loginStudent(true); // 画面更新
+        }
+        showToast('success', '課題を追加し、計画に登録しました'); 
+      }).addMyTask(appState.user.name, v.title, v.desc, v.time, appState.unit.id, appState.user.classId); 
+    } 
+  }); 
+}
+
+// ==========================================
+//  8. 自分用タイマー機能 (Timer Widget)
+// ==========================================
+
+function renderMyTimer() {
+  if (document.getElementById('my-timer-widget')) return;
+  
+  const timerHtml = `
+    <div id="my-timer-widget" class="card shadow rounded-4 bg-white" style="position:fixed; bottom:20px; right:20px; width:180px; z-index:1050; border:1px solid #ddd;">
+      <div class="card-header bg-light border-0 py-1 d-flex justify-content-between align-items-center" style="cursor:move;" onmousedown="dragElement(document.getElementById('my-timer-widget'))">
+        <small class="fw-bold text-muted"><i class="bi bi-clock me-1"></i>Timer</small>
+        <button type="button" class="btn-close btn-close-sm" aria-label="Close" onclick="document.getElementById('my-timer-widget').classList.toggle('d-none')"></button>
+      </div>
+      <div class="card-body p-2 text-center">
+        <div class="display-5 fw-bold mb-2" id="timer-display" style="font-family:monospace;">00:00</div>
+        <div class="btn-group btn-group-sm w-100 mb-2">
+          <button class="btn btn-outline-secondary" onclick="setTimerMode('up')">UP</button>
+          <button class="btn btn-outline-secondary" onclick="setTimerMode('down')">DOWN</button>
+        </div>
+        <div class="input-group input-group-sm mb-2" id="timer-input-group" style="display:none;">
+          <input type="number" id="timer-input-min" class="form-control" placeholder="分" min="1" max="60">
+          <button class="btn btn-primary" onclick="setTimerTime()">設定</button>
+        </div>
+        <div class="d-flex justify-content-between">
+          <button class="btn btn-primary btn-sm rounded-pill px-3" onclick="toggleTimer()" id="timer-btn-toggle"><ruby>開始<rt>かいし</rt></ruby></button>
+          <button class="btn btn-outline-secondary btn-sm rounded-pill" onclick="resetTimer()">リセット</button>
+        </div>
+      </div>
+    </div>
+    <button id="timer-launcher" class="btn btn-primary rounded-circle shadow" style="position:fixed; bottom:20px; right:20px; width:50px; height:50px; z-index:1040;" onclick="document.getElementById('my-timer-widget').classList.remove('d-none');">
+      <i class="bi bi-stopwatch fs-4"></i>
+    </button>
+  `;
+  document.body.insertAdjacentHTML('beforeend', timerHtml);
+}
+
+function setTimerMode(mode) {
+  myTimer.mode = mode;
+  document.getElementById('timer-input-group').style.display = (mode === 'down' && !myTimer.isActive) ? 'flex' : 'none';
+  resetTimer();
+}
+
+function setTimerTime() {
+  const min = parseInt(document.getElementById('timer-input-min').value);
+  if (min > 0) {
+    myTimer.seconds = min * 60;
+    updateTimerDisplay();
+    document.getElementById('timer-input-group').style.display = 'none';
+  }
+}
+
+function toggleTimer() {
+  if (myTimer.isActive) {
+    clearInterval(myTimer.interval);
+    myTimer.isActive = false;
+    document.getElementById('timer-btn-toggle').innerHTML = '<ruby>再開<rt>さいかい</rt></ruby>';
+    document.getElementById('timer-btn-toggle').className = 'btn btn-primary btn-sm rounded-pill px-3';
+  } else {
+    if (myTimer.mode === 'down' && myTimer.seconds === 0) return;
+    myTimer.isActive = true;
+    document.getElementById('timer-btn-toggle').innerHTML = '<ruby>停止<rt>ていし</rt></ruby>';
+    document.getElementById('timer-btn-toggle').className = 'btn btn-danger btn-sm rounded-pill px-3';
+    
+    myTimer.interval = setInterval(() => {
+      if (myTimer.mode === 'up') {
+        myTimer.seconds++;
+      } else {
+        myTimer.seconds--;
+        if (myTimer.seconds <= 0) {
+          clearInterval(myTimer.interval);
+          myTimer.isActive = false;
+          myTimer.seconds = 0;
+          document.getElementById('timer-btn-toggle').innerHTML = '<ruby>開始<rt>かいし</rt></ruby>';
+          document.getElementById('timer-btn-toggle').className = 'btn btn-primary btn-sm rounded-pill px-3';
+          showToast('info', '時間です！');
+        }
+      }
+      updateTimerDisplay();
+    }, 1000);
+  }
+}
+
+function resetTimer() {
+  clearInterval(myTimer.interval);
+  myTimer.isActive = false;
+  myTimer.seconds = 0;
+  updateTimerDisplay();
+  document.getElementById('timer-btn-toggle').innerHTML = '<ruby>開始<rt>かいし</rt></ruby>';
+  document.getElementById('timer-btn-toggle').className = 'btn btn-primary btn-sm rounded-pill px-3';
+  if(myTimer.mode === 'down') document.getElementById('timer-input-group').style.display = 'flex';
+}
+
+function updateTimerDisplay() {
+  const m = Math.floor(myTimer.seconds / 60);
+  const s = myTimer.seconds % 60;
+  document.getElementById('timer-display').textContent = `${('0'+m).slice(-2)}:${('0'+s).slice(-2)}`;
+}
+
+// ウィジェットのドラッグ移動
+function dragElement(elmnt) {
+  let pos1 = 0, pos2 = 0, pos3 = 0, pos4 = 0;
+  elmnt.onmousedown = dragMouseDown;
+
+  function dragMouseDown(e) {
+    e = e || window.event;
+    pos3 = e.clientX;
+    pos4 = e.clientY;
+    document.onmouseup = closeDragElement;
+    document.onmousemove = elementDrag;
+  }
+
+  function elementDrag(e) {
+    e = e || window.event;
+    e.preventDefault();
+    pos1 = pos3 - e.clientX;
+    pos2 = pos4 - e.clientY;
+    pos3 = e.clientX;
+    pos4 = e.clientY;
+    elmnt.style.top = (elmnt.offsetTop - pos2) + "px";
+    elmnt.style.left = (elmnt.offsetLeft - pos1) + "px";
+  }
+
+  function closeDragElement() {
+    document.onmouseup = null;
+    document.onmousemove = null;
+  }
+}
+</script>
