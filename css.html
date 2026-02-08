@@ -1,45 +1,50 @@
 <style>
 /* =========================================
-   1. 変数とテーマ設定 (Variables & Theming)
-   ========================================= */
+   1. テーマ設定と変数 (Variables & Theming)
+   =========================================
+   * アプリ全体の色や影の設定を一括管理します。
+   * 学校のイメージカラーに合わせてここを変更できます。
+   */
 :root {
-  --color-primary: #1a73e8;
-  --color-success: #34a853;
-  --color-warning: #fbbc04;
-  --color-danger: #ea4335;
-  --color-info: #4285f4;
+  /* ブランドカラー (Google Material Colors準拠) */
+  --color-primary: #1a73e8; /* メインカラー（青） */
+  --color-success: #34a853; /* 完了・成功（緑） */
+  --color-warning: #fbbc04; /* 注意・進行中（黄） */
+  --color-danger: #ea4335;  /* SOS・警告（赤） */
+  --color-info: #4285f4;    /* 情報・集中（水色） */
   
-  --bg-body: #f0f2f5;
-  --bg-card: #ffffff;
-  --bg-modal: #ffffff;
-  --bg-input: #ffffff;
+  /* 背景色とテキスト色 */
+  --bg-body: #f0f2f5;       /* アプリ全体の背景色 */
+  --bg-card: #ffffff;       /* カードの背景色 */
+  --bg-modal: #ffffff;      /* モーダルの背景色 */
+  --bg-input: #ffffff;      /* 入力欄の背景色 */
   
-  --text-main: #3c4043;
-  --text-muted: #6c757d;
+  --text-main: #3c4043;     /* 基本文字色 */
+  --text-muted: #6c757d;    /* 薄い文字色 */
   
+  /* その他デザイン要素 */
   --border-color: #dee2e6;
   --shadow-sm: 0 .125rem .25rem rgba(0,0,0,.075);
-  
-  --bg-mytask: #fbf5ff;
+  --bg-mytask: #fbf5ff;     /* 「じぶんの課題」の背景色（薄紫） */
 }
 
 /* =========================================
    2. 基本スタイル & レイアウト (Base Styles)
    ========================================= */
 body {
-  font-family: "Zen Maru Gothic", sans-serif;
+  font-family: "Zen Maru Gothic", sans-serif; /* 子供に読みやすい丸ゴシック体 */
   color: var(--text-main);
   background-color: var(--bg-body);
   transition: background-color 0.3s ease, color 0.3s ease;
   
-  /* アプリライクなフルスクリーンレイアウト */
+  /* アプリライクなフルスクリーンレイアウト設定 */
   height: 100vh;
   display: flex;
   flex-direction: column;
-  overflow: hidden;
+  overflow: hidden; /* 画面全体のスクロールを禁止（内部でスクロールさせる） */
 }
 
-/* ルビの調整 (Rubies) */
+/* ルビ（ふりがな）の調整 */
 ruby {
   ruby-align: center;
 }
@@ -48,42 +53,41 @@ rt {
   color: var(--text-muted);
 }
 
-/* ヘッダー (Header) */
+/* ヘッダー (ナビゲーションバー) */
 nav.navbar {
-  flex-shrink: 0;
+  flex-shrink: 0; /* 縮小させない */
   margin-bottom: 0 !important;
   z-index: 1030;
 }
 
-/* メインコンテンツエリア (Main Content) */
+/* メインコンテンツエリア */
 main.container {
   flex-grow: 1;
   width: 100%;
   max-width: 960px;
   padding-top: 1rem;
-  /* フッターの高さ分 + 余白を確保 */
-  padding-bottom: 80px;
+  padding-bottom: 80px; /* フッターの高さ分 + 余白 */
   display: flex;
   flex-direction: column;
-  overflow-y: auto;
-  -webkit-overflow-scrolling: touch;
+  overflow-y: auto;     /* コンテンツが多い時だけスクロール */
+  -webkit-overflow-scrolling: touch; /* スマホでのスクロールを滑らかに */
 }
 
-/* 先生モード時の全幅表示用クラス */
+/* 先生モード時の全幅表示設定 */
 main.teacher-mode {
   max-width: 100% !important;
   padding-left: 1.5rem;
   padding-right: 1.5rem;
 }
 
-/* アプリコンテナ */
+/* アプリ内部コンテナ */
 #app-container {
   flex-grow: 1;
   display: flex;
   flex-direction: column;
 }
 
-/* フッター (Footer) - 常に画面下に固定 */
+/* フッター (画面下に固定) */
 footer {
   position: fixed;
   bottom: 0;
@@ -93,10 +97,10 @@ footer {
   background-color: var(--bg-card);
   border-top: 1px solid var(--border-color);
   z-index: 1040;
-  padding-bottom: env(safe-area-inset-bottom);
+  padding-bottom: env(safe-area-inset-bottom); /* iPhone X以降の下部バー対応 */
 }
 
-/* Bootstrapのオーバーライド */
+/* Bootstrapデフォルトの上書き */
 .bg-light { background-color: var(--bg-body) !important; }
 .bg-white { background-color: var(--bg-card) !important; }
 .text-muted { color: var(--text-muted) !important; }
@@ -105,10 +109,10 @@ footer {
 .btn-close { filter: var(--btn-close-filter, none); }
 
 /* =========================================
-   3. コンポーネント (Components)
+   3. UIコンポーネント (Components)
    ========================================= */
 
-/* カード */
+/* カード（タスクや生徒カード） */
 .card {
   background-color: var(--bg-card);
   border: none;
@@ -119,35 +123,37 @@ footer {
 }
 .card-task { border-left: 5px solid transparent; }
 .card-task:hover {
-  transform: translateY(-2px);
+  transform: translateY(-2px); /* ホバー時に少し浮く */
   box-shadow: 0 .5rem 1rem rgba(0,0,0,.15) !important;
 }
-/* タスクカードの色帯（カテゴリ別） */
+
+/* ロックされたタスク */
+.card-locked {
+  background-color: rgba(233, 236, 239, 0.5);
+  opacity: 0.7;
+  pointer-events: none; /* クリック無効化 */
+  filter: grayscale(0.8);
+}
+
+/* タスクカテゴリ別の色帯 */
 .border-start-manabu { border-left: 5px solid var(--color-primary) !important; }
 .border-start-fukameru { border-left: 5px solid var(--color-success) !important; }
 .border-start-matomeru { border-left: 5px solid var(--color-warning) !important; }
 .border-start-mytask { border-left: 5px solid #9c27b0 !important; }
 .border-start-other { border-left: 5px solid var(--text-muted) !important; }
 
-.card-locked {
-  background-color: rgba(233, 236, 239, 0.5);
-  opacity: 0.7;
-  pointer-events: none;
-  filter: grayscale(0.8);
-}
-
-/* ステータスアラートスタイル */
+/* ステータスアラート (SOS/集中) */
 .sos-alert {
   border: 2px solid var(--color-danger) !important;
-  background-color: rgba(234, 67, 53, 0.05); /* 薄い赤背景 */
+  background-color: rgba(234, 67, 53, 0.05);
   animation: pulse 1.5s infinite;
 }
 .focus-alert {
   border: 2px solid var(--color-info) !important;
-  background-color: rgba(66, 133, 244, 0.05); /* 薄い青背景 */
+  background-color: rgba(66, 133, 244, 0.05);
 }
 
-/* タブ */
+/* タブナビゲーション */
 .nav-tabs .nav-link {
   color: var(--text-muted);
   border: none;
@@ -164,21 +170,20 @@ footer {
   border-bottom: 3px solid var(--color-primary);
 }
 
-/* スタンプバッジ */
+/* スタンプバッジ (完了時のアニメーション用) */
 .stamp-badge {
   position: absolute; top: -10px; right: -10px;
   font-size: 2.2rem; filter: drop-shadow(0 2px 4px rgba(0,0,0,0.3));
   z-index: 20; pointer-events: none;
 }
 
-/* 先生ビュー固有 */
+/* 先生用ビューのレイアウト調整 */
 .teacher-view-card {
   flex-grow: 1;
   display: flex;
   flex-direction: column;
   overflow: hidden;
 }
-
 #t-area {
   flex-grow: 1;
   display: flex;
@@ -190,11 +195,11 @@ footer {
    4. モジュール & ビュー (Modules & Views)
    ========================================= */
 
-/* タイムライン */
+/* タイムライン (学習進捗バー周辺) */
 .timeline-container {
   position: sticky; top: 0; z-index: 100;
   background: rgba(255, 255, 255, 0.95);
-  backdrop-filter: blur(5px);
+  backdrop-filter: blur(5px); /* すりガラス効果 */
   border-bottom: 1px solid var(--border-color);
   margin-top: -1rem;
   padding-top: 1rem;
@@ -206,7 +211,7 @@ footer {
   background-size: 1rem 1rem;
 }
 
-/* ヒートマップ */
+/* ヒートマップテーブル */
 .heatmap-table th {
   background-color: var(--bg-card);
   color: var(--text-main);
@@ -226,36 +231,38 @@ footer {
 .heatmap-sos { background-color: var(--color-danger) !important; color: #fff; animation: pulse 2s infinite; }
 .heatmap-focus { background-color: var(--color-info) !important; color: #fff; }
 
-/* 計画作成画面（縦スクロール版） */
+/* 計画作成画面 (Drag & Drop) */
 .plan-drop-zone-v {
   transition: background-color 0.2s;
 }
-/* ドラッグ中のハイライト */
-.sortable-ghost {
+.sortable-ghost { /* ドラッグ中の半透明表示 */
   opacity: 0.4;
 }
 
-/* アニメーション定義 */
+/* アニメーション定義 (Animate.css風) */
 @keyframes heartBeat { 0% {transform:scale(1);} 14% {transform:scale(1.3);} 28% {transform:scale(1);} 42% {transform:scale(1.3);} 70% {transform:scale(1);} }
 .animate__heartBeat { animation: heartBeat 1.3s ease-in-out; }
+
 @keyframes flash { from, 50%, to {opacity:1;} 25%, 75% {opacity:0;} }
 .animate__flash { animation: flash 2s infinite; }
+
 @keyframes pulse { from {transform:scale3d(1,1,1);} 50% {transform:scale3d(1.05,1.05,1.05);} to {transform:scale3d(1,1,1);} }
 .animate__pulse { animation: pulse 2s infinite; }
+
 @keyframes bounceIn { 0% {opacity:0;transform:scale3d(0.3,0.3,0.3);} 20% {transform:scale3d(1.1,1.1,1.1);} 40% {transform:scale3d(0.9,0.9,0.9);} 60% {opacity:1;transform:scale3d(1.03,1.03,1.03);} 80% {transform:scale3d(0.97,0.97,0.97);} to {opacity:1;transform:scale3d(1,1,1);} }
 .animate__bounceIn { animation: bounceIn 0.75s; }
 
-/* 振り返りスキルのチェックボックスボタン */
-.btn-check:checked + .btn-outline-primary { background-color: var(--color-primary); color: #fff; border-color: var(--color-primary); }
-.btn-check:checked + .btn-outline-success { background-color: var(--color-success); color: #fff; border-color: var(--color-success); }
-.btn-check:checked + .btn-outline-danger { background-color: var(--color-danger); color: #fff; border-color: var(--color-danger); }
-.btn-check:checked + .btn-outline-warning { background-color: var(--color-warning); color: #000; border-color: var(--color-warning); }
-
-/* ポートフォリオのタイムライン */
+/* ポートフォリオモーダルのスタイル */
 .timeline-wrapper { border-left-color: var(--border-color) !important; }
 .cursor-pointer { cursor: pointer; }
 .edit-icon { opacity: 0.5; transition: opacity 0.2s; }
 .edit-icon:hover { opacity: 1; color: var(--color-primary) !important; }
+
+/* 振り返りスキルボタン (Check時の色変化) */
+.btn-check:checked + .btn-outline-primary { background-color: var(--color-primary); color: #fff; border-color: var(--color-primary); }
+.btn-check:checked + .btn-outline-success { background-color: var(--color-success); color: #fff; border-color: var(--color-success); }
+.btn-check:checked + .btn-outline-danger { background-color: var(--color-danger); color: #fff; border-color: var(--color-danger); }
+.btn-check:checked + .btn-outline-warning { background-color: var(--color-warning); color: #000; border-color: var(--color-warning); }
 
 /* 座席表ビュー */
 .seating-wrapper {
@@ -276,7 +283,7 @@ footer {
   position: relative;
 }
 .seat-card {
-  transition: box-shadow 0.2s, transform 0.2s, left 0.2s ease-out, top 0.2s ease-out; /* グリッドスナップアニメーション */
+  transition: box-shadow 0.2s, transform 0.2s, left 0.2s ease-out, top 0.2s ease-out;
 }
 .seat-card:hover {
   z-index: 100 !important;
@@ -284,7 +291,7 @@ footer {
   transform: scale(1.02);
 }
 
-/* かわいいコンパスローダー */
+/* ローディング画面のアニメーション (コンパス) */
 .compass-loader {
   width: 100px;
   height: 100px;
@@ -298,51 +305,26 @@ footer {
   justify-content: center;
   align-items: center;
 }
-
 .compass-loader::before {
-  content: '';
-  position: absolute;
-  width: 10px;
-  height: 10px;
-  background: #f48fb1;
-  border-radius: 50%;
-  z-index: 10;
+  content: ''; position: absolute; width: 10px; height: 10px; background: #f48fb1; border-radius: 50%; z-index: 10;
 }
-
 .compass-needle {
-  width: 8px;
-  height: 70px;
-  position: absolute;
-  animation: cuteSpin 2s infinite ease-in-out;
+  width: 8px; height: 70px; position: absolute; animation: cuteSpin 2s infinite ease-in-out;
 }
-
 .compass-needle::before {
-  content: '';
-  position: absolute;
-  top: 0; left: 0;
-  width: 0; height: 0;
-  border-left: 4px solid transparent;
-  border-right: 4px solid transparent;
-  border-bottom: 35px solid #ffab91; /* パステルレッド */
+  content: ''; position: absolute; top: 0; left: 0; width: 0; height: 0;
+  border-left: 4px solid transparent; border-right: 4px solid transparent; border-bottom: 35px solid #ffab91;
 }
-
 .compass-needle::after {
-  content: '';
-  position: absolute;
-  bottom: 0; left: 0;
-  width: 0; height: 0;
-  border-left: 4px solid transparent;
-  border-right: 4px solid transparent;
-  border-top: 35px solid #80deea; /* パステルブルー */
+  content: ''; position: absolute; bottom: 0; left: 0; width: 0; height: 0;
+  border-left: 4px solid transparent; border-right: 4px solid transparent; border-top: 35px solid #80deea;
 }
-
 @keyframes cuteSpin {
   0% { transform: rotate(0deg); }
   40% { transform: rotate(190deg); }
   60% { transform: rotate(170deg); }
   100% { transform: rotate(360deg); }
 }
-
 @keyframes float {
   0%, 100% { transform: translateY(0); }
   50% { transform: translateY(-10px); }
@@ -351,9 +333,7 @@ footer {
 /* 文字間隔調整 */
 .spacing-1 { letter-spacing: 0.1em; }
 
-/* -------------------------------------------
-   Ver 1.7 新機能: まとめリスト（テーブルビュー）
-   ------------------------------------------- */
+/* まとめリスト（テーブルビュー） */
 .summary-table-container {
   height: 100%;
   overflow: auto;
@@ -362,109 +342,135 @@ footer {
   box-shadow: var(--shadow-sm);
   border: 1px solid var(--border-color);
 }
-.summary-table {
-  width: 100%;
-  border-collapse: separate;
-  border-spacing: 0;
-}
+.summary-table { width: 100%; border-collapse: separate; border-spacing: 0; }
 .summary-table th {
-  position: sticky;
-  top: 0;
-  background-color: #f8f9fa; /* ヘッダー背景 */
-  z-index: 10;
-  padding: 0.8rem 1rem;
-  border-bottom: 2px solid var(--border-color);
-  color: var(--text-muted);
-  font-size: 0.85rem;
-  font-weight: bold;
+  position: sticky; top: 0; background-color: #f8f9fa; z-index: 10;
+  padding: 0.8rem 1rem; border-bottom: 2px solid var(--border-color);
+  color: var(--text-muted); font-size: 0.85rem; font-weight: bold;
 }
 .summary-table td {
-  padding: 1rem;
-  vertical-align: top;
-  border-bottom: 1px solid var(--border-color);
+  padding: 1rem; vertical-align: top; border-bottom: 1px solid var(--border-color);
   background-color: var(--bg-card);
 }
-.summary-table tr:hover td {
-  background-color: #f8f9fa; /* ホバー時のハイライト */
-}
+.summary-table tr:hover td { background-color: #f8f9fa; }
 
-/* 列幅の定義 */
+/* テーブル列幅 */
 .st-col-name { width: 140px; font-weight: bold; white-space: nowrap; }
 .st-col-skills { width: 180px; }
 .st-col-summary { min-width: 300px; }
 .st-col-feedback { width: 350px; }
 
 /* スキルバッジ */
-.skill-badge-group {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-}
+.skill-badge-group { display: flex; flex-wrap: wrap; gap: 4px; }
 .skill-mini-badge {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 0.7rem;
-  padding: 2px 8px;
-  border-radius: 12px;
-  color: white;
-  font-weight: bold;
-  box-shadow: 0 1px 2px rgba(0,0,0,0.1);
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 0.7rem; padding: 2px 8px; border-radius: 12px;
+  color: white; font-weight: bold; box-shadow: 0 1px 2px rgba(0,0,0,0.1);
 }
 
-/* スタンプ選択（アイコンのみ） */
+/* スタンプ選択アイコン */
 .stamp-select-group {
-  display: flex;
-  gap: 10px;
-  margin-bottom: 8px;
-  background: #fff;
-  padding: 5px 10px;
-  border-radius: 20px;
-  border: 1px solid var(--border-color);
-  width: fit-content;
+  display: flex; gap: 10px; margin-bottom: 8px; background: #fff;
+  padding: 5px 10px; border-radius: 20px; border: 1px solid var(--border-color); width: fit-content;
 }
 .stamp-option {
-  cursor: pointer;
-  opacity: 0.4;
-  transition: all 0.2s ease;
-  font-size: 1.4rem;
-  filter: grayscale(1);
-  line-height: 1;
+  cursor: pointer; opacity: 0.4; transition: all 0.2s ease;
+  font-size: 1.4rem; filter: grayscale(1); line-height: 1;
 }
-.stamp-option:hover {
-  opacity: 0.8;
-  transform: scale(1.1);
-  filter: grayscale(0.5);
+.stamp-option:hover { opacity: 0.8; transform: scale(1.1); filter: grayscale(0.5); }
+.stamp-input { display: none; }
+.stamp-input:checked + .stamp-option { opacity: 1; transform: scale(1.2); filter: grayscale(0); }
+
+/* まとめ文章エリア */
+.summary-text-area {
+  background-color: #f8f9fa; border-radius: 8px; padding: 12px;
+  font-size: 0.95rem; white-space: pre-wrap; max-height: 150px; overflow-y: auto;
+  border: 1px solid transparent; transition: max-height 0.3s;
 }
-/* 隠しラジオボタンで選択状態を管理 */
-.stamp-input {
-  display: none;
-}
-.stamp-input:checked + .stamp-option {
-  opacity: 1;
-  transform: scale(1.2);
-  filter: grayscale(0);
+.summary-text-area:hover { background-color: #fff; border-color: var(--border-color); }
+.summary-text-area:focus { max-height: none; } /* フォーカス時に展開 */
+.summary-empty { color: var(--text-muted); font-style: italic; font-size: 0.8rem; }
+
+/* =========================================
+   5. ギャラリーウォーク (Gallery Walk)
+   ========================================= */
+
+/* ギャラリーコンテナ */
+.gallery-container {
+  padding: 1rem;
+  background-color: #f8f9fa;
+  border-radius: 1rem;
+  min-height: 100%;
 }
 
-/* まとめ文章のエリア */
-.summary-text-area {
-  background-color: #f8f9fa;
-  border-radius: 8px;
-  padding: 12px;
-  font-size: 0.95rem;
-  white-space: pre-wrap;
-  max-height: 150px;
-  overflow-y: auto;
-  border: 1px solid transparent;
-  transition: max-height 0.3s;
+/* 生徒カード */
+.gallery-card {
+  transition: transform 0.2s, box-shadow 0.2s;
+  cursor: default;
+  border: 1px solid var(--border-color);
+  background: white;
 }
-.summary-text-area:hover {
-  background-color: #fff;
-  border-color: var(--border-color);
+.gallery-card:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 .5rem 1rem rgba(0,0,0,.1);
 }
-.summary-empty {
+
+/* ミニタイムライン（計画の可視化） */
+.mini-timeline-row {
+  display: flex;
+  align-items: center;
+  margin-bottom: 4px;
+  height: 24px;
+}
+.mini-timeline-label {
+  width: 30px;
+  font-size: 0.7rem;
   color: var(--text-muted);
-  font-style: italic;
-  font-size: 0.8rem;
+  text-align: right;
+  padding-right: 6px;
+  font-weight: bold;
+}
+.mini-timeline-track {
+  flex-grow: 1;
+  display: flex;
+  gap: 2px;
+  height: 100%;
+  background: #f1f3f4;
+  border-radius: 4px;
+  overflow: hidden;
+  padding: 2px;
+}
+
+/* タスクブロック（色分け） */
+.mini-task-block {
+  flex-grow: 1;
+  height: 100%;
+  border-radius: 2px;
+  position: relative;
+  min-width: 10px;
+}
+/* カテゴリ別の色（透明度を少し下げて柔らかく） */
+.bg-manabu { background-color: var(--color-primary); opacity: 0.8; }
+.bg-fukameru { background-color: var(--color-success); opacity: 0.8; }
+.bg-matomeru { background-color: var(--color-warning); opacity: 0.8; }
+.bg-mytask { background-color: #9c27b0; opacity: 0.8; }
+.bg-other { background-color: var(--text-muted); opacity: 0.5; }
+
+/* ツールチップ（ホバー時にタスク名表示） */
+.mini-task-block:hover::after {
+  content: attr(data-title);
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(0,0,0,0.8);
+  color: white;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 0.7rem;
+  white-space: nowrap;
+  z-index: 1000;
+  pointer-events: none;
+  margin-bottom: 4px;
 }
 </style>
