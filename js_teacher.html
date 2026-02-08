@@ -1,0 +1,1734 @@
+<script>
+/**
+ * 🧭 みらいコンパス Ver. 1.0 - Teacher Logic (先生用機能)
+ * ==============================================================================
+ * このファイルは、先生モード（管理画面）の動作を制御します。
+ * ・認証（パスワード確認）
+ * ・ダッシュボード（LIVEモニタリング、座席表、ヒートマップ、まとめ一覧）
+ * ・単元設計（ドラッグ＆ドロップでの計画作成、AIによる案作成）
+ * ・授業コントロール（スケジュール配信、メッセージ）
+ * ・名簿管理
+ */
+
+// ==========================================
+//  1. 認証・ログイン (Authentication)
+// ==========================================
+
+/**
+ * [モーダル] 先生用ログイン画面
+ */
+function attemptTeacherLogin() {
+  Swal.fire({
+    title: '教員用ログイン',
+    input: 'password',
+    inputAttributes: { autocapitalize: 'off' },
+    showCancelButton: true,
+    confirmButtonText: 'ログイン',
+    showLoaderOnConfirm: true,
+    preConfirm: (pass) => {
+      return new Promise((resolve, reject) => {
+        // サーバーでパスワード照合
+        google.script.run
+          .withSuccessHandler(res => {
+            if (res.authenticated) {
+              resolve(true); 
+            } else {
+              Swal.showValidationMessage('パスワードが違います');
+              resolve(false); 
+            }
+          })
+          .withFailureHandler(e => { Swal.showValidationMessage(e.message); resolve(false); })
+          .verifyPassword(pass);
+      });
+    }
+  }).then((result) => {
+    if (result.isConfirmed) {
+      switchMode('teacher'); // コア機能でモード切り替え
+      showToast('success', '先生モードでログインしました');
+    }
+  });
+}
+
+/**
+ * [モーダル] パスワード変更
+ */
+function changePasswordPrompt() {
+  Swal.fire({
+    title: 'パスワード変更',
+    input: 'text',
+    inputLabel: '新しいパスワードを入力',
+    showCancelButton: true,
+    confirmButtonText: '変更'
+  }).then(r => {
+    if (r.isConfirmed && r.value) {
+      google.script.run
+        .withSuccessHandler(() => Swal.fire('完了', 'パスワードを変更しました', 'success'))
+        .changeTeacherPassword(r.value);
+    }
+  });
+}
+
+// ==========================================
+//  2. ダッシュボード表示 (Dashboard Views)
+// ==========================================
+
+/**
+ * [画面描画] 先生用メイン画面の枠組み
+ */
+function renderTeacherView() {
+  const container = document.getElementById('app-container');
+  
+  // クラス切り替えタブの生成
+  const classes = ['All', ...dataStore.classList];
+  const tabsHtml = classes.map(c => 
+    `<li class="nav-item"><a class="nav-link ${appState.view.teacherClassId === c ? 'active fw-bold' : ''}" href="#" onclick="setTeacherClass('${c}')">${c === 'All' ? '全員' : c}</a></li>`
+  ).join('');
+
+  container.innerHTML = `
+    <div class="card shadow-sm p-4 border-0 rounded-4 teacher-view-card h-100">
+      <!-- 上部ヘッダー：モード切替ボタン群 -->
+      <div class="d-flex justify-content-between align-items-center mb-3 flex-shrink-0">
+        <h5 class="fw-bold m-0 text-primary"><i class="bi bi-speedometer2 me-2"></i>モニター <span class="badge bg-success ms-2 small" style="font-size:0.6rem">AUTO</span></h5>
+        <div class="d-flex gap-3 align-items-center">
+          <div class="btn-group shadow-sm rounded-pill" role="group">
+            <button class="btn btn-sm ${appState.view.teacher === 'cards' ? 'btn-primary' : 'btn-outline-primary'}" onclick="setTeacherView('cards')">LIVE</button>
+            <button class="btn btn-sm ${appState.view.teacher === 'heatmap' ? 'btn-primary' : 'btn-outline-primary'}" onclick="setTeacherView('heatmap')">一覧</button>
+            <button class="btn btn-sm ${appState.view.teacher === 'seating' ? 'btn-primary' : 'btn-outline-primary'}" onclick="setTeacherView('seating')">座席</button>
+            <button class="btn btn-sm ${appState.view.teacher === 'summaries' ? 'btn-primary' : 'btn-outline-primary'}" onclick="setTeacherView('summaries')">まとめ</button>
+            <button class="btn btn-sm ${appState.view.teacher === 'design' ? 'btn-primary' : 'btn-outline-primary'}" onclick="setTeacherView('design')"><i class="bi bi-pencil-ruler me-1"></i>設計</button>
+            <button class="btn btn-sm ${appState.view.teacher === 'control' ? 'btn-primary' : 'btn-outline-primary'}" onclick="setTeacherView('control')">進行</button>
+          </div>
+          <button class="btn btn-primary btn-sm rounded-pill px-3 shadow-sm" onclick="openUnitManagerModal()"><i class="bi bi-plus-circle me-1"></i>新規単元登録</button>
+        </div>
+      </div>
+      
+      <!-- クラスフィルタータブ -->
+      <ul class="nav nav-tabs mb-4 border-bottom-0 flex-shrink-0">${tabsHtml}</ul>
+      
+      <!-- メインコンテンツエリア -->
+      <div id="t-area" class="position-relative flex-grow-1 d-flex flex-column overflow-hidden"></div>
+    </div>`;
+    
+  renderTeacherDashboardContent(); // 中身を描画
+}
+
+// ビュー切り替えヘルパー
+function setTeacherClass(cls) { appState.view.teacherClassId = cls; renderTeacherView(); }
+function setTeacherView(mode) { appState.view.teacher = mode; renderTeacherView(); }
+
+/**
+ * [画面描画] ダッシュボードの中身を振り分け
+ */
+function renderTeacherDashboardContent() {
+  const el = document.getElementById('t-area');
+  if (!el) return;
+  
+  // スクロール位置の維持
+  const scrollPos = el.scrollTop;
+  
+  // 設計画面(design)の時だけ、全体スクロールを止めてドラッグ操作をしやすくする
+  const mainEl = document.querySelector('main');
+  const appContainer = document.getElementById('app-container');
+  if (mainEl && appContainer) {
+    if (appState.view.teacher === 'design') {
+      mainEl.style.overflow = 'hidden';        
+      mainEl.style.display = 'flex';            
+      mainEl.style.flexDirection = 'column';
+      mainEl.style.paddingBottom = '0';
+      appContainer.classList.add('h-100');
+      appContainer.style.overflow = 'hidden';
+    } else {
+      mainEl.style.overflow = '';
+      mainEl.style.display = '';
+      mainEl.style.flexDirection = '';
+      mainEl.style.paddingBottom = ''; 
+      appContainer.classList.remove('h-100');
+      appContainer.style.overflow = '';
+    }
+  }
+
+  // 表示モードに応じた関数呼び出し
+  if (appState.view.teacher === 'summaries') { renderSummaryListView(el); if(scrollPos>0) el.scrollTop = scrollPos; return; }
+  if (appState.view.teacher === 'seating') { renderSeatingView(el); return; }
+  if (appState.view.teacher === 'control') { renderControlView(el); return; }
+  if (appState.view.teacher === 'design') { renderTeacherDesignView(el); return; } 
+  
+  const targetStudents = getFilteredStudents();
+  if (appState.view.teacher === 'cards') {
+    renderLiveCards(el, targetStudents);
+  } else {
+    renderHeatmap(el, targetStudents);
+  }
+  
+  if(appState.view.teacher !== 'design' && scrollPos > 0) el.scrollTop = scrollPos;
+}
+
+/**
+ * [データ処理] 表示対象の生徒データを抽出
+ */
+function getFilteredStudents() {
+  if (appState.view.teacherClassId === 'All') return dataStore.liveStatus;
+  return dataStore.liveStatus.filter(s => s.classId === appState.view.teacherClassId);
+}
+
+/**
+ * [高速更新] 自動更新時に画面全体を再描画せず、カードの色や文字だけ書き換える
+ */
+function updateLiveViews() {
+  const students = getFilteredStudents();
+  
+  // LIVEビューの場合
+  if (appState.view.teacher === 'cards') {
+    students.forEach(s => {
+      const card = document.getElementById(`live-card-${s.name}`);
+      if (card) {
+        const isSos = (s.mode === 'たすけて' || s.mode === 'sos');
+        const isFocus = (s.mode === 'しゅうちゅう' || s.mode === 'focus');
+        const isOtherUnit = s.currentUnitId && s.currentUnitId !== appState.unit.id;
+        
+        // クラスの付け替え
+        card.className = `card h-100 text-center p-3 shadow-sm border-0 rounded-4 ${isSos ? 'sos-alert bg-light-danger border-danger' : ''} ${isFocus ? 'border-info' : ''}`;
+        card.style.opacity = isOtherUnit ? '0.5' : '1';
+        
+        // アイコン更新
+        const icon = card.querySelector('.bi-person-circle');
+        if (icon) {
+          icon.className = `bi bi-person-circle fs-1 my-2 ${isSos ? 'text-danger' : (isFocus ? 'text-info' : 'text-secondary')}`;
+        }
+        
+        // テキスト更新
+        const taskEl = card.querySelector('.task-text');
+        if (taskEl) taskEl.innerHTML = isOtherUnit ? '<span class="small text-secondary">他単元を学習中</span>' : (s.task || '-');
+        
+        const badgeEl = card.querySelector('.mode-badge');
+        if (badgeEl) badgeEl.textContent = s.mode || '通常';
+      }
+    });
+  }
+  
+  // 座席表ビューの場合
+  else if (appState.view.teacher === 'seating' && !isDraggingSeat) {
+    const canvas = document.getElementById('seating-canvas');
+    if (canvas) {
+      students.forEach(s => {
+        const card = canvas.querySelector(`.seat-card[data-name="${s.name}"]`);
+        if (card) {
+          const isSos = (s.mode === 'たすけて' || s.mode === 'sos');
+          const isFocus = (s.mode === 'しゅうちゅう' || s.mode === 'focus');
+          
+          if (isSos) card.classList.add('sos-alert', 'bg-light-danger');
+          else card.classList.remove('sos-alert', 'bg-light-danger');
+          
+          const icon = card.querySelector('.bi-person-circle');
+          if (icon) icon.className = `bi bi-person-circle fs-3 ${isSos ? 'text-danger' : (isFocus ? 'text-info' : 'text-secondary')}`;
+          
+          const taskDiv = card.querySelector('.x-small');
+          if(taskDiv) taskDiv.textContent = s.task || '-';
+        }
+      });
+    }
+  }
+}
+
+// ==========================================
+//  3. 各ビューの描画ロジック (View Implementations)
+// ==========================================
+
+/**
+ * [LIVEビュー] カード一覧表示
+ */
+function renderLiveCards(container, students) {
+  container.className = "flex-grow-1 overflow-auto"; 
+  if (students.length === 0) {
+    container.innerHTML = `<div class="text-muted p-5 text-center">表示する生徒がいません</div>`;
+  } else {
+    container.innerHTML = `<div class="row row-cols-2 row-cols-md-4 row-cols-lg-5 g-3">${students.map(s => {
+      const isOtherUnit = s.currentUnitId && s.currentUnitId !== appState.unit.id;
+      const opacity = isOtherUnit ? '0.5' : '1';
+      const taskDisplay = isOtherUnit ? '<span class="small text-secondary">他単元を学習中</span>' : (s.task || '-');
+      const isSos = (s.mode === 'たすけて' || s.mode === 'sos');
+      const isFocus = (s.mode === 'しゅうちゅう' || s.mode === 'focus');
+      
+      return `
+      <div class="col">
+        <div id="live-card-${s.name}" class="card h-100 text-center p-3 shadow-sm border-0 rounded-4 ${isSos ? 'sos-alert bg-light-danger border-danger' : ''} ${isFocus ? 'border-info' : ''}" style="opacity: ${opacity}">
+          <div class="fw-bold text-truncate mb-2">${s.name}</div>
+          <i class="bi bi-person-circle fs-1 my-2 ${isSos ? 'text-danger' : (isFocus ? 'text-info' : 'text-secondary')}"></i>
+          <div class="small text-muted text-truncate task-text">${taskDisplay}</div>
+          <div class="badge bg-light text-muted mt-1 fw-normal mode-badge">${s.mode || '通常'}</div>
+        </div>
+      </div>`;
+    }).join('')}</div>`;
+  }
+}
+
+/**
+ * [一覧ビュー] ヒートマップ（進捗一覧表）
+ */
+function renderHeatmap(container, students) {
+  container.className = "flex-grow-1 overflow-auto";
+  const currentTasks = getCurrentUnitTasks();
+  if (currentTasks.length === 0) { container.innerHTML = `<div class="text-center p-5">この単元の課題データなし</div>`; return; }
+  
+  const studentNames = students.map(s => s.name).sort();
+  if (studentNames.length === 0) { container.innerHTML = `<div class="text-center p-5">生徒データなし</div>`; return; }
+
+  let h = `<div class="table-responsive mb-4"><table class="table table-borderless heatmap-table"><thead><tr><th style="min-width:100px;text-align:left">名前</th>${currentTasks.map((t, i) => `<th title="${t.title}" onclick="showTeacherTaskDetailSimple('${t.taskId}')">${t.step ? t.step.replace(/[^0-9]/g, '') : i + 1}</th>`).join('')}</tr></thead><tbody>`;
+  
+  studentNames.forEach(n => {
+    const st = dataStore.liveStatus.find(d => d.name === n);
+    const isSos = st && (st.mode === 'たすけて' || st.mode === 'sos');
+    const isFocus = st && (st.mode === 'しゅうちゅう' || st.mode === 'focus');
+    const ic = isSos ? '<i class="bi bi-exclamation-circle-fill text-danger ms-1 animate__animated animate__flash"></i>' : (isFocus ? '<i class="bi bi-lightning-fill text-info ms-1"></i>' : '');
+    
+    // 生徒名クリックでポートフォリオ表示
+    h += `<tr><td class="text-start fw-bold text-truncate" style="max-width:120px;cursor:pointer;text-decoration:underline" onclick="renderPortfolioModal('${n}', true)">${n}${ic}</td>`;
+    
+    currentTasks.forEach(t => {
+      const p = (dataStore.clsProgress[n] && dataStore.clsProgress[n][t.taskId]) || {};
+      const stamp = (dataStore.clsFeedback[n] && dataStore.clsFeedback[n][t.taskId]);
+      
+      let cls = "", icon = "";
+      if (p.status === '完了') cls = "heatmap-done";
+      else if (p.status === '途中') cls = "heatmap-doing";
+      else if (isSos) cls = "heatmap-sos"; // SOS中は未完了セルを点滅させる
+      else if (isFocus) cls = "heatmap-focus";
+      
+      if (stamp) { if(stamp==='check') icon='✅'; if(stamp==='good') icon='👍'; if(stamp==='great') icon='💮'; if(stamp==='support') icon='🚩'; }
+      
+      h += `<td><div class="heatmap-cell-wrapper" onclick="showStudentTaskDetail('${n}', '${t.taskId}')"><div class="heatmap-cell ${cls}" title="${t.title}">${icon}</div></div></td>`;
+    });
+    h += '</tr>';
+  });
+  
+  // 課題の凡例
+  const indexHtml = `<div class="card bg-light border-0 rounded-4 p-3 mt-3"><h6 class="fw-bold text-muted mb-2"><i class="bi bi-list-ol me-2"></i>課題インデックス（${appState.unit.title}）</h6><div class="row row-cols-1 row-cols-md-2 g-2 small">${currentTasks.map((t, i) => `<div class="col" style="cursor:pointer" onclick="showTeacherTaskDetailSimple('${t.taskId}')"><span class="badge bg-secondary me-2" style="width:25px;">${t.step ? t.step.replace(/[^0-9]/g, '') : i + 1}</span><span class="badge bg-white text-dark border me-1">${t.category}</span><span class="text-truncate d-inline-block" style="max-width:200px;vertical-align:middle">${t.title}</span></div>`).join('')}</div></div>`;
+  container.innerHTML = h + '</tbody></table></div>' + indexHtml;
+}
+
+/**
+ * [座席ビュー] ドラッグ可能な座席表
+ */
+function renderSeatingView(container) {
+  const students = getFilteredStudents();
+  if (students.length === 0) {
+    container.innerHTML = `<div class="text-center p-5 text-muted">表示する生徒がいません</div>`;
+    return;
+  }
+
+  container.className = "flex-grow-1 d-flex flex-column overflow-hidden";
+  container.innerHTML = `
+    <div class="d-flex justify-content-between mb-2 flex-shrink-0">
+      <div class="small text-muted"><i class="bi bi-info-circle me-1"></i>カードをドラッグして座席を配置できます（グリッド吸着あり）</div>
+      <!-- [修正] ボタンにIDを追加して操作可能に -->
+      <button id="btn-save-seating" class="btn btn-primary btn-sm rounded-pill px-3" onclick="saveSeating()">配置を保存</button>
+    </div>
+    <div class="seating-wrapper border rounded-4 bg-light shadow-inner flex-grow-1 position-relative overflow-hidden">
+       <div id="seating-canvas" class="seating-canvas position-absolute top-0 start-0 w-100 h-100 overflow-auto">
+         <!-- Cards will be injected here -->
+       </div>
+    </div>`;
+
+  const canvas = document.getElementById('seating-canvas');
+  
+  students.forEach(s => {
+    const x = s.x || 50;
+    const y = s.y || 50;
+    const isSos = (s.mode === 'たすけて' || s.mode === 'sos');
+    const isFocus = (s.mode === 'しゅうちゅう' || s.mode === 'focus');
+    
+    const card = document.createElement('div');
+    card.className = `card shadow-sm seat-card position-absolute ${isSos ? 'sos-alert' : ''}`;
+    card.style.left = x + 'px';
+    card.style.top = y + 'px';
+    card.style.width = '100px';
+    card.setAttribute('data-name', s.name);
+    
+    card.innerHTML = `
+      <div class="card-body p-2 text-center" style="cursor: move;" onmousedown="startDragSeat(event, this)" ontouchstart="startDragSeat(event, this)">
+        <div class="fw-bold text-truncate small mb-1">${s.name}</div>
+        <i class="bi bi-person-circle fs-3 ${isSos ? 'text-danger' : (isFocus ? 'text-info' : 'text-secondary')}"></i>
+        <div class="x-small text-muted text-truncate mt-1">${s.task || '-'}</div>
+      </div>
+    `;
+    canvas.appendChild(card);
+  });
+}
+
+// 座席ドラッグの処理（グリッドスナップ付き）
+let dragSrcEl = null;
+let isDraggingSeat = false;
+let dragStartX = 0; // [追加] ドラッグ開始時のX座標
+let dragStartY = 0; // [追加] ドラッグ開始時のY座標
+
+function startDragSeat(e, cardBody) {
+  e.preventDefault(); 
+  const card = cardBody.parentElement;
+  dragSrcEl = card;
+  isDraggingSeat = true;
+  
+  const clientX = e.type.includes('mouse') ? e.clientX : e.touches[0].clientX;
+  const clientY = e.type.includes('mouse') ? e.clientY : e.touches[0].clientY;
+  
+  // [追加] 開始位置を記録
+  dragStartX = parseInt(card.style.left, 10) || 0;
+  dragStartY = parseInt(card.style.top, 10) || 0;
+  
+  const shiftX = clientX - card.getBoundingClientRect().left;
+  const shiftY = clientY - card.getBoundingClientRect().top;
+  
+  const canvas = document.getElementById('seating-canvas');
+  const canvasRect = canvas.getBoundingClientRect();
+
+  function moveAt(pageX, pageY) {
+    let newLeft = pageX - shiftX - canvasRect.left;
+    let newTop = pageY - shiftY - canvasRect.top;
+    
+    if (newLeft < 0) newLeft = 0;
+    if (newTop < 0) newTop = 0;
+    if (newLeft > canvasRect.width - card.offsetWidth) newLeft = canvasRect.width - card.offsetWidth;
+    if (newTop > canvasRect.height - card.offsetHeight) newTop = canvasRect.height - card.offsetHeight;
+
+    card.style.left = newLeft + 'px';
+    card.style.top = newTop + 'px';
+  }
+
+  function onMouseMove(e) {
+    const px = e.type.includes('mouse') ? e.pageX : e.touches[0].pageX;
+    const py = e.type.includes('mouse') ? e.pageY : e.touches[0].pageY;
+    moveAt(px, py);
+  }
+
+  function onMouseUp() {
+    document.removeEventListener('mousemove', onMouseMove);
+    document.removeEventListener('mouseup', onMouseUp);
+    document.removeEventListener('touchmove', onMouseMove);
+    document.removeEventListener('touchend', onMouseUp);
+    
+    // グリッドに吸着
+    const GRID = CONSTANTS.SEAT_GRID_SIZE;
+    const currentLeft = parseInt(card.style.left, 10);
+    const currentTop = parseInt(card.style.top, 10);
+    
+    const snapLeft = Math.round(currentLeft / GRID) * GRID + 10;
+    const snapTop = Math.round(currentTop / GRID) * GRID + 10;
+    
+    // [追加] 重なりチェック
+    if (checkCollision(card, snapLeft, snapTop)) {
+        // 重なっているので元の位置に戻す
+        card.style.transition = 'all 0.2s ease-out';
+        card.style.left = dragStartX + 'px';
+        card.style.top = dragStartY + 'px';
+        showToast('warning', 'そこにカードは置けません');
+    } else {
+        // 移動確定
+        card.style.transition = 'all 0.2s ease-out';
+        card.style.left = snapLeft + 'px';
+        card.style.top = snapTop + 'px';
+    }
+    
+    setTimeout(() => { card.style.transition = ''; }, 200);
+
+    dragSrcEl = null;
+    isDraggingSeat = false;
+  }
+
+  document.addEventListener('mousemove', onMouseMove);
+  document.addEventListener('mouseup', onMouseUp);
+  document.addEventListener('touchmove', onMouseMove, {passive: false});
+  document.addEventListener('touchend', onMouseUp);
+}
+
+// [追加] 衝突判定関数
+function checkCollision(targetCard, x, y) {
+    const cards = document.querySelectorAll('.seat-card');
+    for (let i = 0; i < cards.length; i++) {
+        const other = cards[i];
+        if (other === targetCard) continue; // 自分自身はスキップ
+        
+        const otherX = parseInt(other.style.left, 10);
+        const otherY = parseInt(other.style.top, 10);
+        
+        // 許容誤差を含めて判定（グリッドサイズ未満の距離なら重なりとみなす）
+        const dist = Math.sqrt(Math.pow(x - otherX, 2) + Math.pow(y - otherY, 2));
+        if (dist < CONSTANTS.SEAT_GRID_SIZE / 2) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function saveSeating() {
+  // [修正] ボタンの取得とローディング状態への変更
+  const btn = document.getElementById('btn-save-seating');
+  const originalText = btn ? btn.innerHTML : '配置を保存';
+  
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>保存中...';
+  }
+
+  const cards = document.querySelectorAll('.seat-card');
+  const coords = [];
+  cards.forEach(c => {
+    coords.push({
+      name: c.getAttribute('data-name'),
+      x: parseInt(c.style.left, 10),
+      y: parseInt(c.style.top, 10)
+    });
+  });
+  
+  google.script.run
+    .withSuccessHandler(() => {
+      showToast('success', '座席配置を保存しました');
+      
+      // [追加] ローカルのデータストアも更新して、タブ切り替え等でリセットされないようにする
+      coords.forEach(c => {
+        const student = dataStore.liveStatus.find(s => s.name === c.name);
+        if (student) {
+          student.x = c.x;
+          student.y = c.y;
+        }
+      });
+
+      // [修正] 処理成功時にボタンを元に戻す
+      if (btn) {
+        btn.disabled = false;
+        btn.innerHTML = originalText;
+      }
+    })
+    .withFailureHandler((e) => {
+      handleError(e);
+      // [修正] エラー時もボタンを元に戻す
+      if (btn) {
+        btn.disabled = false;
+        btn.innerHTML = originalText;
+      }
+    })
+    .saveSeatCoordinates(coords);
+}
+
+/**
+ * [まとめビュー] ポートフォリオ一覧とフィードバック
+ */
+function renderSummaryListView(container) {
+  container.className = "flex-grow-1 p-3 overflow-hidden d-flex flex-column"; 
+  
+  const students = getFilteredStudents().sort((a,b) => a.name.localeCompare(b.name));
+  
+  if (students.length === 0) {
+    container.innerHTML = `<div class="text-center p-5 text-muted">表示する生徒がいません</div>`;
+    return;
+  }
+
+  let tableRows = '';
+  students.forEach((s, index) => {
+    // ポートフォリオデータ取得
+    let pf = {};
+    if (dataStore.clsPortfolios && dataStore.clsPortfolios[s.name] && dataStore.clsPortfolios[s.name][appState.unit.id]) {
+      const rawPf = dataStore.clsPortfolios[s.name][appState.unit.id];
+      pf = (typeof rawPf === 'object') ? rawPf : { summary: rawPf, feedback: "", stamp: "" };
+    }
+    const summary = pf.summary || "";
+    const feedback = pf.feedback || "";
+    const stamp = pf.stamp || "";
+
+    // スキル集計
+    const skillCounts = {};
+    SKILL_DEFINITIONS.forEach(def => skillCounts[def.id] = 0);
+    
+    if (dataStore.clsReflections && dataStore.clsReflections[s.name] && dataStore.clsReflections[s.name][appState.unit.id]) {
+      const reflections = dataStore.clsReflections[s.name][appState.unit.id];
+      Object.values(reflections).forEach(r => {
+        if (r.skills && Array.isArray(r.skills)) {
+          r.skills.forEach(sid => { if (skillCounts[sid] !== undefined) skillCounts[sid]++; });
+        }
+      });
+    }
+
+    // スキルバッジHTML生成
+    let skillBadges = '';
+    SKILL_DEFINITIONS.forEach(def => {
+      const count = skillCounts[def.id];
+      if (count > 0) {
+        skillBadges += `<span class="skill-mini-badge bg-${def.color}" title="${def.label}: ${count}回">${def.label.charAt(0)}${count}</span>`;
+      }
+    });
+    if (!skillBadges) skillBadges = '<span class="text-muted small">-</span>';
+
+    const uniqueId = `pf-${index}`;
+
+    tableRows += `
+      <tr>
+        <td class="st-col-name text-center text-muted small align-middle">${index + 1}</td>
+        <td class="st-col-name align-middle">
+          <div class="fw-bold text-primary" style="cursor:pointer;" onclick="renderPortfolioModal('${s.name}', true)">
+            ${s.name} <i class="bi bi-box-arrow-up-right small ms-1 text-muted"></i>
+          </div>
+        </td>
+        <td class="st-col-skills align-middle">
+          <div class="skill-badge-group">${skillBadges}</div>
+        </td>
+        <td class="st-col-summary">
+          <div class="summary-text-area" id="summary-${uniqueId}" onclick="this.style.maxHeight='none'; this.style.cursor='text';" title="クリックで全文表示">
+            ${summary ? summary.replace(/\n/g, '<br>') : '<span class="summary-empty">未提出</span>'}
+          </div>
+        </td>
+        <td class="st-col-feedback align-middle">
+          <div class="stamp-select-group">
+            <label><input type="radio" name="stamp-${uniqueId}" value="check" class="stamp-input" ${stamp==='check'?'checked':''}><span class="stamp-option" title="確認">✅</span></label>
+            <label><input type="radio" name="stamp-${uniqueId}" value="good" class="stamp-input" ${stamp==='good'?'checked':''}><span class="stamp-option" title="いいね">👍</span></label>
+            <label><input type="radio" name="stamp-${uniqueId}" value="great" class="stamp-input" ${stamp==='great'?'checked':''}><span class="stamp-option" title="すばらしい">💮</span></label>
+            <label><input type="radio" name="stamp-${uniqueId}" value="support" class="stamp-input" ${stamp==='support'?'checked':''}><span class="stamp-option" title="応援">🚩</span></label>
+          </div>
+          <div class="input-group input-group-sm">
+            <input type="text" id="fb-text-${uniqueId}" class="form-control" placeholder="コメントを入力..." value="${feedback}">
+            <button id="btn-save-${uniqueId}" class="btn btn-primary" onclick="saveListFeedback('${s.name}', '${uniqueId}')">保存</button>
+          </div>
+        </td>
+      </tr>`;
+  });
+
+  container.innerHTML = `
+    <div class="summary-table-container h-100">
+      <table class="summary-table">
+        <thead>
+          <tr>
+            <th class="text-center" style="width:40px;">#</th>
+            <th class="st-col-name">名前</th>
+            <th class="st-col-skills">獲得スキル</th>
+            <th class="st-col-summary">単元のまとめ</th>
+            <th class="st-col-feedback">
+              <div class="d-flex justify-content-between align-items-center">
+                <span>フィードバック</span>
+                <button id="btn-bulk-save" class="btn btn-success btn-sm rounded-pill px-3 shadow-sm" onclick="saveAllListFeedbacks()">
+                  <i class="bi bi-save me-1"></i>一括保存
+                </button>
+              </div>
+            </th>
+          </tr>
+        </thead>
+        <tbody>
+          ${tableRows}
+        </tbody>
+      </table>
+    </div>`;
+}
+
+function saveListFeedback(studentName, uniqueId) {
+  const comment = document.getElementById(`fb-text-${uniqueId}`).value;
+  const stampEl = document.querySelector(`input[name="stamp-${uniqueId}"]:checked`);
+  const stamp = stampEl ? stampEl.value : "";
+  
+  const btn = document.getElementById(`btn-save-${uniqueId}`);
+  const originalText = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '...';
+  
+  // サーバーへ保存
+  google.script.run
+    .withSuccessHandler(() => {
+      showToast('success', '保存しました');
+      btn.disabled = false;
+      btn.innerHTML = originalText;
+    })
+    .withFailureHandler((e) => {
+      handleError(e);
+      btn.disabled = false;
+      btn.innerHTML = originalText;
+    })
+    .savePortfolioFeedback(studentName, appState.unit.id, comment, stamp);
+}
+
+function saveAllListFeedbacks() {
+  const students = getFilteredStudents();
+  if (students.length === 0) return;
+
+  const btn = document.getElementById('btn-bulk-save');
+  const originalHtml = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>保存中...';
+
+  const feedbackList = [];
+  students.forEach((s, index) => {
+    const uniqueId = `pf-${index}`;
+    const commentInput = document.getElementById(`fb-text-${uniqueId}`);
+    const stampEl = document.querySelector(`input[name="stamp-${uniqueId}"]:checked`);
+    
+    if (commentInput) {
+      feedbackList.push({
+        studentName: s.name,
+        unitId: appState.unit.id,
+        feedback: commentInput.value,
+        stamp: stampEl ? stampEl.value : ""
+      });
+    }
+  });
+
+  google.script.run
+    .withSuccessHandler(() => {
+      showToast('success', '全員分を保存しました');
+      btn.disabled = false;
+      btn.innerHTML = originalHtml;
+    })
+    .withFailureHandler((e) => {
+      handleError(e);
+      btn.disabled = false;
+      btn.innerHTML = originalHtml;
+    })
+    .saveAllPortfolios(feedbackList);
+}
+
+// ==========================================
+//  4. 単元設計・管理 (Unit Design)
+// ==========================================
+
+/**
+ * [設計画面] ドラッグ＆ドロップで授業計画を立てる
+ */
+function renderTeacherDesignView(container) {
+  // スクロール位置の保存
+  const poolContainer = document.getElementById('teacher-pool-container');
+  const poolScrollY = poolContainer ? poolContainer.scrollTop : 0;
+  const designScrollContainer = document.getElementById('teacher-design-scroll-view');
+  const designScrollY = designScrollContainer ? designScrollContainer.scrollTop : 0;
+
+  container.className = "d-flex flex-column flex-grow-1 overflow-hidden h-100";
+  container.style.height = "100%";
+  
+  const currentTasks = getCurrentUnitTasks(); 
+  const totalHours = appState.unit.totalHours; 
+  
+  const taskPool = [];
+  const hoursMap = {}; 
+  
+  for(let i = 1; i <= totalHours; i++) hoursMap[i] = [];
+  
+  currentTasks.forEach(t => {
+    const stepNum = getStepNumber(t.step);
+    if (stepNum > 0 && hoursMap[stepNum]) {
+      hoursMap[stepNum].push(t);
+    } else {
+      taskPool.push(t);
+    }
+  });
+
+  // 未配置プールのカードHTML生成
+  let taskPoolHtml = '';
+  taskPool.forEach(t => {
+    const borderClass = getCategoryColorClass(t.category);
+    const badge = t.format === 'teacher' ? '<span class="badge bg-info text-white me-1">先生</span>' : '';
+    taskPoolHtml += `
+      <div class="card p-2 mb-2 shadow-sm task-draggable ${borderClass}" data-id="${t.taskId}" onclick="openTeacherTaskEditModal('${t.taskId}')" style="cursor:pointer">
+        <div class="small fw-bold">${badge}${t.title}</div>
+        <div class="d-flex justify-content-between align-items-center mt-1">
+          <span class="badge bg-light text-secondary border rounded-pill" style="font-size:0.6rem">${t.category}</span>
+          <div class="x-small text-muted">${t.time}分</div>
+        </div>
+      </div>`;
+  });
+
+  // 時数レーンのカードHTML生成
+  let hoursHtml = '';
+  for(let i = 1; i <= totalHours; i++) {
+    let hourTasksHtml = '';
+    let totalTime = 0;
+    
+    hoursMap[i].forEach(t => {
+      totalTime += t.time;
+      const borderClass = getCategoryColorClass(t.category);
+      const badge = t.format === 'teacher' ? '<span class="badge bg-info text-white me-1">先生</span>' : '';
+      hourTasksHtml += `
+        <div class="card p-2 mb-2 shadow-sm task-draggable ${borderClass}" data-id="${t.taskId}" onclick="openTeacherTaskEditModal('${t.taskId}')" style="cursor:pointer">
+          <div class="d-flex justify-content-between">
+            <span class="small fw-bold text-truncate">${badge}${t.title}</span>
+          </div>
+          <div class="d-flex justify-content-between align-items-center mt-1">
+            <span class="badge bg-light text-secondary border rounded-pill" style="font-size:0.6rem">${t.category}</span>
+            <div class="x-small text-muted text-end">${t.time}分</div>
+          </div>
+        </div>`;
+    });
+
+    const timeRatio = Math.min(totalTime / CONSTANTS.UNIT_TIME, 1) * 100;
+    const barColor = totalTime > CONSTANTS.UNIT_TIME ? '#ffcdd2' : '#c8e6c9';
+    const headerStyle = `background: linear-gradient(90deg, ${barColor} ${timeRatio}%, #f8f9fa ${timeRatio}%);`;
+
+    hoursHtml += `
+      <div class="plan-hour-row mb-3">
+        <div class="plan-hour-header-v p-2 fw-bold text-center border rounded-top position-relative" style="${headerStyle}">
+          第${i}時 <span class="small ms-2 fw-normal badge bg-white text-dark border">${totalTime}分</span>
+        </div>
+        <div class="plan-drop-zone-v p-2 border border-top-0 rounded-bottom teacher-design-dropzone" data-step="Step ${i}" style="min-height: 80px; background-color: #fff;">
+          ${hourTasksHtml}
+        </div>
+      </div>`;
+  }
+
+  // 全体のレイアウト
+  container.innerHTML = `
+    <div class="d-flex justify-content-between align-items-center mb-3 p-3 pb-0 flex-shrink-0">
+      <div class="d-flex align-items-center">
+        <h5 class="fw-bold m-0 text-muted me-2">単元計画</h5>
+        <button class="btn btn-light btn-sm text-secondary rounded-circle me-3" onclick="openUnitInfoEditModal()" title="単元情報の編集">
+          <i class="bi bi-pencil-fill"></i>
+        </button>
+        <div class="input-group input-group-sm w-auto me-3">
+          <span class="input-group-text">全</span>
+          <input type="text" class="form-control text-center fw-bold" value="${totalHours}" style="width:50px;" readonly>
+          <span class="input-group-text">時間</span>
+          <button class="btn btn-outline-secondary" onclick="changeUnitTotalHours(1)"><i class="bi bi-plus-lg"></i></button>
+          <button class="btn btn-outline-secondary" onclick="changeUnitTotalHours(-1)"><i class="bi bi-dash-lg"></i></button>
+        </div>
+        <button class="btn btn-primary btn-sm rounded-pill px-3 shadow-sm" onclick="syncUnitToPassport()" title="みらいパスポートでワークシートを作成">
+          <i class="bi bi-rocket-takeoff-fill me-2"></i>WS作成連携
+        </button>
+      </div>
+    </div>
+    
+    <div class="row flex-grow-1 px-3 pb-3 mx-0" style="min-height:0; overflow:hidden;">
+      <div class="col-4 h-100 p-0 d-flex flex-column border-end bg-white rounded-start overflow-hidden">
+        <div class="p-2 border-bottom fw-bold text-muted d-flex justify-content-between align-items-center flex-shrink-0">
+          <span><i class="bi bi-inbox me-2"></i>未配置・その他</span>
+          <button class="btn btn-outline-primary btn-sm rounded-circle" onclick="openTeacherTaskEditModal('NEW')"><i class="bi bi-plus"></i></button>
+        </div>
+        <div id="teacher-pool-container" class="flex-grow-1 overflow-auto p-2 teacher-design-dropzone" data-step="">
+          ${taskPoolHtml}
+        </div>
+      </div>
+      <div class="col-8 h-100 p-0 d-flex flex-column bg-light rounded-end overflow-hidden">
+        <div id="teacher-design-scroll-view" class="flex-grow-1 overflow-auto p-3">
+          <div class="alert alert-info small py-2 mb-3"><i class="bi bi-info-circle me-2"></i>ここでの変更は<strong>全員の初期計画（デフォルト）</strong>として保存されます。</div>
+          ${hoursHtml}
+        </div>
+      </div>
+    </div>`;
+
+  // スクロール位置復元
+  if (document.getElementById('teacher-pool-container')) document.getElementById('teacher-pool-container').scrollTop = poolScrollY;
+  if (document.getElementById('teacher-design-scroll-view')) document.getElementById('teacher-design-scroll-view').scrollTop = designScrollY;
+
+  // Sortable設定 (ドラッグ＆ドロップ)
+  const dropZones = document.querySelectorAll('.teacher-design-dropzone');
+  dropZones.forEach(el => {
+    new Sortable(el, {
+      group: 'teacher-design',
+      sort: true,
+      animation: 150,
+      onAdd: function (evt) {
+        const taskId = evt.item.getAttribute('data-id');
+        const newStep = evt.to.getAttribute('data-step') || ""; 
+        
+        // ローカル更新
+        const task = dataStore.masterTasks.find(t => t.taskId === taskId);
+        if (task) {
+          task.step = newStep;
+          renderTeacherDesignView(document.getElementById('t-area')); 
+          // サーバー保存
+          google.script.run
+            .withFailureHandler(handleError)
+            .updateUnitTask(taskId, { step: newStep });
+        }
+      }
+    });
+  });
+}
+
+/**
+ * [モーダル] タスク編集（先生用）
+ */
+function openTeacherTaskEditModal(taskId) {
+  let task = {};
+  let isNew = false;
+  
+  // 教材リンク情報のヘルパー
+  const parseMat = (str) => { try { return JSON.parse(str||'{}'); } catch(e){ return {name:str,url:''}; } };
+  const serializeMat = (name, url) => { if(!name&&!url)return ''; if(url&&url.trim()) return JSON.stringify({name,url}); return name; };
+
+  if (taskId === 'NEW') {
+    isNew = true;
+    task = { title: '', description: '', estimatedTime: 15, category: 'まなぶ', format: 'student', type: 'must', step: '' };
+  } else {
+    task = dataStore.masterTasks.find(t => t.taskId === taskId);
+    if (!task) return;
+  }
+
+  const tb = parseMat(task.textbook);
+  const tbTablet = parseMat(task.tablet);
+  const tbPrint = parseMat(task.print);
+
+  Swal.fire({
+    title: isNew ? '新しいタスク' : 'タスク編集',
+    html: `
+      <div class="text-start">
+        <div class="mb-3">
+          <label class="form-label small fw-bold">タイトル</label>
+          <input id="ed-title" class="form-control" value="${task.title || ''}">
+        </div>
+        <div class="mb-3">
+          <label class="form-label small fw-bold">説明文</label>
+          <textarea id="ed-desc" class="form-control" rows="2">${task.desc || task.description || ''}</textarea>
+        </div>
+        <div class="row mb-3">
+          <div class="col">
+            <label class="form-label small fw-bold">目安時間(分)</label>
+            <input type="number" id="ed-time" class="form-control" value="${task.time || task.estimatedTime || 15}">
+          </div>
+          <div class="col">
+            <label class="form-label small fw-bold">カテゴリ</label>
+            <select id="ed-cat" class="form-select">
+              <option value="まなぶ" ${task.category==='まなぶ'?'selected':''}>まなぶ</option>
+              <option value="ふかめる" ${task.category==='ふかめる'?'selected':''}>ふかめる</option>
+              <option value="まとめる" ${task.category==='まとめる'?'selected':''}>まとめる</option>
+              <option value="導入" ${task.category==='導入'?'selected':''}>導入</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="card p-2 bg-light border-0 mb-3">
+          <div class="small fw-bold text-muted mb-2"><i class="bi bi-link-45deg"></i> 学習リンク・資料</div>
+          <div class="mb-2">
+            <label class="form-label x-small text-muted mb-0">教科書・資料</label>
+            <div class="input-group input-group-sm">
+              <span class="input-group-text"><i class="bi bi-book"></i></span>
+              <input type="text" id="ed-tb-name" class="form-control" placeholder="名称 (例: P.24)" value="${tb.name||''}">
+              <input type="text" id="ed-tb-url" class="form-control" placeholder="URL (任意)" value="${tb.url||''}">
+            </div>
+          </div>
+          <div class="mb-2">
+            <label class="form-label x-small text-muted mb-0">タブレット・アプリ</label>
+            <div class="input-group input-group-sm">
+              <span class="input-group-text"><i class="bi bi-tablet"></i></span>
+              <input type="text" id="ed-tab-name" class="form-control" placeholder="名称 (例: NHK for School)" value="${tbTablet.name||''}">
+              <input type="text" id="ed-tab-url" class="form-control" placeholder="URL (任意)" value="${tbTablet.url||''}">
+            </div>
+          </div>
+          <div class="mb-2">
+            <label class="form-label x-small text-muted mb-0">プリント・その他</label>
+            <div class="input-group input-group-sm">
+              <span class="input-group-text"><i class="bi bi-file-earmark-text"></i></span>
+              <input type="text" id="ed-pr-name" class="form-control" placeholder="名称 (例: ワークシート)" value="${tbPrint.name||''}">
+              <input type="text" id="ed-pr-url" class="form-control" placeholder="URL (任意)" value="${tbPrint.url||''}">
+            </div>
+          </div>
+        </div>
+
+        <div class="mb-3 form-check form-switch border p-2 rounded bg-white">
+          <input class="form-check-input ms-0 me-2" type="checkbox" id="ed-teacher" ${task.format === 'teacher' ? 'checked' : ''} style="float:none;">
+          <label class="form-check-label fw-bold" for="ed-teacher">先生タスク（固定表示）にする</label>
+          <div class="form-text x-small ps-1">ONにすると、指定した時数に自動的に固定表示されます。</div>
+        </div>
+      </div>`,
+    showCancelButton: true,
+    confirmButtonText: '保存',
+    showDenyButton: !isNew,
+    denyButtonText: '削除',
+    denyButtonColor: '#d33',
+    width: '550px',
+    preConfirm: () => {
+      const tbStr = serializeMat(document.getElementById('ed-tb-name').value, document.getElementById('ed-tb-url').value);
+      const tabStr = serializeMat(document.getElementById('ed-tab-name').value, document.getElementById('ed-tab-url').value);
+      const prStr = serializeMat(document.getElementById('ed-pr-name').value, document.getElementById('ed-pr-url').value);
+
+      return {
+        title: document.getElementById('ed-title').value,
+        description: document.getElementById('ed-desc').value,
+        estTime: parseInt(document.getElementById('ed-time').value),
+        category: document.getElementById('ed-cat').value,
+        format: document.getElementById('ed-teacher').checked ? 'teacher' : 'student',
+        textbook: tbStr,
+        tablet: tabStr,
+        print: prStr
+      };
+    }
+  }).then(r => {
+    if (r.isConfirmed) {
+      const newData = r.value;
+      if (isNew) {
+        // [修正] 楽観的UI更新: 即座に画面に反映し、バックグラウンドでサーバー通信を行う
+        const tempId = "TEMP_" + new Date().getTime();
+        const tempTask = {
+            unitId: appState.unit.id,
+            taskId: tempId,
+            title: newData.title,
+            description: newData.description,
+            estTime: newData.estTime,
+            category: newData.category,
+            format: newData.format,
+            step: '',
+            time: newData.estTime,
+            desc: newData.description,
+            type: 'must',
+            textbook: newData.textbook,
+            tablet: newData.tablet,
+            print: newData.print
+        };
+        dataStore.masterTasks.push(tempTask);
+        renderTeacherDesignView(document.getElementById('t-area'));
+        
+        // サーバー通信 (バックグラウンド)
+        google.script.run
+          .withSuccessHandler(res => {
+             if(res.success) {
+               // 成功時: IDを正式なものに差し替え
+               const realId = res.taskId;
+               const targetIndex = dataStore.masterTasks.findIndex(t => t.taskId === tempId);
+               if (targetIndex > -1) {
+                   dataStore.masterTasks[targetIndex].taskId = realId;
+                   // IDが変わったので再描画してDOMのdata-idを更新しておく（次回の編集のため）
+                   renderTeacherDesignView(document.getElementById('t-area'));
+               }
+               showToast('success', '保存完了'); 
+             } else { 
+                 // 失敗時: ロールバック
+                 dataStore.masterTasks = dataStore.masterTasks.filter(t => t.taskId !== tempId);
+                 renderTeacherDesignView(document.getElementById('t-area'));
+                 handleError(res); 
+             }
+          })
+          .withFailureHandler(e => {
+              // 失敗時: ロールバック
+              dataStore.masterTasks = dataStore.masterTasks.filter(t => t.taskId !== tempId);
+              renderTeacherDesignView(document.getElementById('t-area'));
+              handleError(e);
+          })
+          .addUnitTask(appState.unit.id, newData);
+      } else {
+        const t = dataStore.masterTasks.find(x => x.taskId === taskId);
+        t.title = newData.title;
+        t.desc = newData.description;
+        t.time = newData.estTime;
+        t.category = newData.category;
+        t.format = newData.format;
+        t.textbook = newData.textbook;
+        t.tablet = newData.tablet;
+        t.print = newData.print;
+        
+        renderTeacherDesignView(document.getElementById('t-area'));
+        google.script.run
+          .withSuccessHandler(() => showToast('success', '更新しました'))
+          .withFailureHandler(handleError)
+          .updateUnitTask(taskId, newData);
+      }
+    } else if (r.isDenied) {
+      Swal.fire({ title: '削除しますか？', text: 'このタスクを削除します。', icon: 'warning', showCancelButton: true, confirmButtonColor: '#d33', confirmButtonText: '削除実行' }).then(delRes => {
+        if(delRes.isConfirmed) {
+          dataStore.masterTasks = dataStore.masterTasks.filter(t => t.taskId !== taskId);
+          renderTeacherDesignView(document.getElementById('t-area'));
+          google.script.run.withSuccessHandler(() => showToast('info', '削除しました')).withFailureHandler(handleError).deleteUnitTask(taskId);
+        }
+      });
+    }
+  });
+}
+
+function openUnitInfoEditModal() {
+  const unit = appState.unitList.find(u => u.id === appState.unit.id);
+  if (!unit) return;
+
+  Swal.fire({
+    title: '単元情報の編集',
+    html: `
+      <div class="text-start">
+        <div class="mb-3"><label class="form-label small fw-bold">単元名 <span class="text-danger">*</span></label><input id="ue-title" class="form-control" value="${unit.title || ''}"></div>
+        <div class="row mb-3">
+          <div class="col"><label class="form-label small fw-bold">教科</label><input id="ue-subject" class="form-control" value="${unit.subject || ''}"></div>
+          <div class="col"><label class="form-label small fw-bold">学年</label><input id="ue-grade" class="form-control" value="${unit.grade || ''}"></div>
+        </div>
+        <div class="mb-3"><label class="form-label small fw-bold">単元のめあて</label><textarea id="ue-goal" class="form-control" rows="2">${unit.goal || ''}</textarea></div>
+        <div class="mb-3"><label class="form-label small fw-bold">概要</label><textarea id="ue-description" class="form-control" rows="3">${unit.description || ''}</textarea></div>
+      </div>`,
+    showCancelButton: true,
+    confirmButtonText: '更新する',
+    preConfirm: () => {
+      const title = document.getElementById('ue-title').value;
+      if (!title) { Swal.showValidationMessage('単元名は必須です'); return false; }
+      return { title: title, subject: document.getElementById('ue-subject').value, grade: document.getElementById('ue-grade').value, goal: document.getElementById('ue-goal').value, description: document.getElementById('ue-description').value };
+    }
+  }).then(r => {
+    if (r.isConfirmed) {
+      const newData = r.value;
+      unit.title = newData.title; unit.subject = newData.subject; unit.grade = newData.grade; unit.goal = newData.goal; unit.description = newData.description;
+      appState.unit.title = unit.title;
+      renderUnitSelector();
+      renderTeacherDesignView(document.getElementById('t-area'));
+      google.script.run.withSuccessHandler(() => showToast('success', '単元情報を更新しました')).withFailureHandler(handleError).updateUnitBasicInfo(unit.id, newData);
+    }
+  });
+}
+
+function changeUnitTotalHours(delta) {
+  const current = appState.unit.totalHours;
+  const next = current + delta;
+  if (next < 1) return;
+  appState.unit.totalHours = next;
+  renderTeacherDesignView(document.getElementById('t-area'));
+  google.script.run
+    .withFailureHandler(e => { appState.unit.totalHours = current; handleError(e); renderTeacherDesignView(document.getElementById('t-area')); })
+    .withSuccessHandler(() => showToast('success', '時数を変更しました'))
+    .updateUnitTotalHours(appState.unit.id, next);
+}
+
+// ==========================================
+//  5. 新規単元作成・AIインポート (Unit Create)
+// ==========================================
+
+function openUnitManagerModal() {
+  google.script.run.withSuccessHandler(res => {
+    const initialPrompt = (res.success && res.prompt) ? res.prompt : DEFAULT_AI_PROMPT;
+
+    Swal.fire({
+      title: '<i class="bi bi-folder2-open me-2"></i>単元管理',
+      html: `
+        <ul class="nav nav-tabs mb-3" id="unit-mgr-tabs" role="tablist">
+          <li class="nav-item" role="presentation">
+            <button class="nav-link active" id="um-create-tab" data-bs-toggle="tab" data-bs-target="#um-create" type="button">手動で新規作成</button>
+          </li>
+          <li class="nav-item" role="presentation">
+            <button class="nav-link" id="um-ai-tab" data-bs-toggle="tab" data-bs-target="#um-ai" type="button"><i class="bi bi-stars text-warning me-1"></i>AIインポート</button>
+          </li>
+        </ul>
+        <div class="tab-content text-start" id="unit-mgr-content">
+          <!-- 手動作成タブ -->
+          <div class="tab-pane fade show active" id="um-create" role="tabpanel">
+            <div class="mb-3">
+              <label class="form-label small fw-bold">単元名 <span class="text-danger">*</span></label>
+              <input id="cu-title" class="form-control" placeholder="例：火事からくらしを守る">
+            </div>
+            <div class="row mb-3">
+              <div class="col">
+                <label class="form-label small fw-bold">教科</label>
+                <input id="cu-subject" class="form-control" placeholder="例：社会">
+              </div>
+              <div class="col">
+                <label class="form-label small fw-bold">学年</label>
+                <input id="cu-grade" class="form-control" placeholder="例：3年">
+              </div>
+            </div>
+            <div class="mb-3">
+              <label class="form-label small fw-bold">総時数（時間）</label>
+              <input type="number" id="cu-hours" class="form-control" value="8" min="1">
+            </div>
+            <div class="d-grid">
+              <button class="btn btn-primary rounded-pill" onclick="submitCreateUnit()">作成する</button>
+            </div>
+          </div>
+          
+          <!-- AIインポートタブ -->
+          <div class="tab-pane fade" id="um-ai" role="tabpanel">
+            <div class="accordion mb-3" id="ai-steps">
+              
+              <!-- Step 1 Item -->
+              <div class="accordion-item">
+                <h2 class="accordion-header">
+                  <button class="accordion-button" type="button" data-bs-toggle="collapse" data-bs-target="#step1" aria-expanded="true" aria-controls="step1">
+                    Step 1: AIに呪文を唱える
+                  </button>
+                </h2>
+                <div id="step1" class="accordion-collapse collapse show" data-bs-parent="#ai-steps">
+                  <div class="accordion-body bg-light">
+                    
+                    <div class="d-flex justify-content-between align-items-end mb-2">
+                      <p class="small text-muted mb-0">この呪文（プロンプト）をAIに送信してください。<br>内容は自由に編集・保存できます。</p>
+                      <div class="btn-group btn-group-sm">
+                        <button class="btn btn-outline-secondary" onclick="resetCustomPrompt()" title="初期値に戻す"><i class="bi bi-arrow-counterclockwise"></i></button>
+                        <button class="btn btn-outline-primary" onclick="saveCustomPrompt()" title="この内容を保存"><i class="bi bi-save"></i> 保存</button>
+                      </div>
+                    </div>
+                    
+                    <textarea id="prompt-area" class="form-control mb-3 border-primary font-monospace" rows="12" style="font-size:0.8rem; white-space: pre-wrap;">${initialPrompt}</textarea>
+                    
+                    <button class="btn btn-primary w-100 mb-3" onclick="copyPrompt()">
+                      <i class="bi bi-clipboard me-2"></i>プロンプトをコピー
+                    </button>
+                    
+                    <!-- [修正] ボタン配置をグリッドシステム(row/col-6)で整理 -->
+                    <div class="row g-2">
+                      <div class="col-6">
+                        <a href="https://chat.openai.com/" target="_blank" class="btn btn-dark w-100 d-flex align-items-center justify-content-center">
+                          <i class="bi bi-robot me-2"></i>ChatGPT
+                        </a>
+                      </div>
+                      <div class="col-6">
+                        <a href="https://gemini.google.com/" target="_blank" class="btn btn-primary w-100 d-flex align-items-center justify-content-center" style="background-color: #0d6efd; border-color: #0d6efd;">
+                          <i class="bi bi-stars me-2"></i>Gemini
+                        </a>
+                      </div>
+                    </div>
+
+                  </div><!-- End accordion-body -->
+                </div><!-- End collapse -->
+              </div><!-- End accordion-item -->
+              
+              <!-- Step 2 Item -->
+              <div class="accordion-item">
+                <h2 class="accordion-header">
+                  <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#step2" aria-expanded="false" aria-controls="step2">
+                    Step 2: コードを貼り付ける
+                  </button>
+                </h2>
+                <div id="step2" class="accordion-collapse collapse" data-bs-parent="#ai-steps">
+                  <div class="accordion-body">
+                    <p class="small text-muted mb-2">AIが作成したコード（ { ... } で囲まれた部分）をコピーして、ここに貼り付けてください。</p>
+                    <textarea id="json-input" class="form-control mb-3 font-monospace" rows="10" placeholder='{ "unitInfo": ... }' style="font-size:0.8rem;"></textarea>
+                    <div class="d-grid">
+                      <button class="btn btn-success rounded-pill" onclick="submitImportJson()"><i class="bi bi-file-earmark-code me-2"></i>インポート実行</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              
+            </div><!-- End accordion -->
+          </div>
+        </div>
+      `,
+      showConfirmButton: false,
+      showCloseButton: true,
+      width: '800px',
+      didOpen: () => {
+        const popup = Swal.getPopup();
+        popup.style.transition = 'width 0.3s ease-in-out, max-width 0.3s ease-in-out';
+        
+        const tabCreate = document.getElementById('um-create-tab');
+        const tabAi = document.getElementById('um-ai-tab');
+        
+        // タブ切り替え時に幅を調整
+        tabCreate.addEventListener('shown.bs.tab', () => {
+           popup.style.width = '600px';
+           popup.style.maxWidth = '95vw';
+        });
+        
+        tabAi.addEventListener('shown.bs.tab', () => {
+           popup.style.width = '90%';
+           popup.style.maxWidth = '1200px';
+        });
+      }
+    });
+  }).withFailureHandler(handleError).getCustomAiPrompt();
+}
+
+function submitCreateUnit() {
+  const title = document.getElementById('cu-title').value;
+  if (!title) { Swal.showValidationMessage('単元名を入力してください'); return; }
+  const data = { title: title, subject: document.getElementById('cu-subject').value, grade: document.getElementById('cu-grade').value, totalHours: parseInt(document.getElementById('cu-hours').value) || 8 };
+  
+  showLoading();
+  google.script.run
+    .withSuccessHandler(res => {
+      if (res.success) {
+        google.script.run.withSuccessHandler(dataRes => {
+          updateDataStore(dataRes.json);
+          changeUnit(res.unitId);
+          renderUnitSelector();
+          hideLoading();
+          Swal.close();
+          Swal.fire('作成完了', '新しい単元を作成しました', 'success');
+        }).getData();
+      } else { handleError(res); }
+    })
+    .withFailureHandler(handleError)
+    .createNewUnit(data);
+}
+
+function copyPrompt() {
+  const el = document.getElementById('prompt-area');
+  el.select();
+  document.execCommand('copy');
+  const btn = document.querySelector('button[onclick="copyPrompt()"]');
+  const originHTML = btn.innerHTML;
+  btn.innerHTML = '<i class="bi bi-check"></i> コピーしました！';
+  btn.classList.replace('btn-outline-primary', 'btn-success');
+  setTimeout(() => { btn.innerHTML = originHTML; btn.classList.replace('btn-success', 'btn-outline-primary'); }, 2000);
+}
+
+function saveCustomPrompt() {
+  const text = document.getElementById('prompt-area').value;
+  google.script.run.withSuccessHandler(() => showToast('success', 'プロンプト設定を保存しました')).withFailureHandler(handleError).saveCustomAiPrompt(text);
+}
+
+function resetCustomPrompt() {
+  if(confirm('プロンプトを初期値に戻しますか？')) {
+    document.getElementById('prompt-area').value = DEFAULT_AI_PROMPT;
+  }
+}
+
+function submitImportJson() {
+  const jsonStr = document.getElementById('json-input').value;
+  if (!jsonStr) return;
+  try { JSON.parse(jsonStr); } catch(e) { Swal.showValidationMessage('JSON形式が正しくありません'); return; }
+
+  showLoading();
+  google.script.run.withSuccessHandler(d => {
+    if (d.success) {
+      google.script.run.withSuccessHandler(dataRes => {
+        updateDataStore(dataRes.json);
+        if (appState.unitList.length > 0) {
+           const newUnit = appState.unitList[0];
+           changeUnit(newUnit.id);
+           renderUnitSelector();
+        }
+        hideLoading();
+        Swal.close();
+        Swal.fire('インポート完了', d.count + '件の課題を追加しました', 'success');
+      }).getData();
+    } else { handleError(d); }
+  }).importUnitJson(jsonStr);
+}
+
+// [連携] パスポートへ単元計画を送信
+function syncUnitToPassport() {
+  if (!appState.passportDbId || !appState.passportUrl) {
+    Swal.fire({ icon: 'warning', title: '連携未設定', text: '「みらいパスポート」の設定が完了していません。右上の設定ボタンから登録してください。' });
+    return;
+  }
+
+  Swal.fire({
+    title: 'ワークシート作成連携',
+    text: `現在の単元「${appState.unit.title}」の計画データをパスポートへ送信し、ワークシートを一括作成しますか？`,
+    icon: 'question',
+    showCancelButton: true,
+    confirmButtonColor: '#1a73e8',
+    confirmButtonText: '送信して作成開始'
+  }).then((result) => {
+    if (result.isConfirmed) {
+      showLoading();
+      google.script.run
+        .withSuccessHandler(res => {
+          hideLoading();
+          if (res.success) {
+            Swal.fire({ title: '連携成功', text: 'みらいパスポートを開きます。', icon: 'success', timer: 2000, showConfirmButton: false });
+            if (res.passportUrl) window.open(res.passportUrl, '_blank');
+          } else {
+            handleError({ message: res.message || '連携に失敗しました' });
+          }
+        })
+        .withFailureHandler(handleError)
+        .sendUnitPlanToPassport_DirectDB(appState.unit.id);
+    }
+  });
+}
+
+// ==========================================
+//  6. 授業コントロール (Class Control)
+// ==========================================
+
+function renderControlView(container) {
+  container.className = "flex-grow-1 overflow-auto p-3";
+  const todayStr = new Date().toISOString().split('T')[0];
+  const unitOptions = appState.unitList.map(u => `<option value="${u.id}">${u.title}</option>`).join('');
+  const periodButtons = CONSTANTS.CLASS_PERIODS.map(p => `<button class="btn btn-outline-secondary btn-sm me-1 mb-1" onclick="setScheduleTime('${p.start}', '${p.end}')">${p.label}</button>`).join('');
+
+  container.innerHTML = `
+    <div class="row g-4">
+      <div class="col-md-6">
+        <div class="card border-0 shadow-sm rounded-4 h-100">
+          <div class="card-header bg-white border-0 fw-bold text-primary"><i class="bi bi-calendar-event me-2"></i>授業スケジュールの配信</div>
+          <div class="card-body">
+            <p class="small text-muted">設定した日時に、児童の画面へ「授業への移動通知」を表示します。</p>
+            <div class="mb-3"><label class="form-label small">日付</label><input type="date" id="sc-date" class="form-control" value="${todayStr}"></div>
+            <div class="mb-2"><label class="form-label small">時間割から選択</label><div>${periodButtons}</div></div>
+            <div class="row mb-3">
+              <div class="col"><label class="form-label small">開始</label><input type="time" id="sc-start" class="form-control" value="08:45"></div>
+              <div class="col"><label class="form-label small">終了</label><input type="time" id="sc-end" class="form-control" value="09:30"></div>
+            </div>
+            <div class="mb-3"><label class="form-label small">単元</label><select id="sc-unit" class="form-select">${unitOptions}</select></div>
+            <div class="mb-3"><label class="form-label small">時数</label><input type="number" id="sc-hour" class="form-control" value="1" min="1"></div>
+            <div class="mb-3"><label class="form-label small">メッセージ（任意）</label><input type="text" id="sc-msg" class="form-control" placeholder="例：今日はテストです"></div>
+            <button class="btn btn-primary w-100 rounded-pill" onclick="submitSchedule()">設定を配信する</button>
+          </div>
+        </div>
+      </div>
+      <div class="col-md-6">
+        <div class="card border-0 shadow-sm rounded-4 h-100">
+          <div class="card-header bg-white border-0 fw-bold text-success"><i class="bi bi-list-check me-2"></i>配信済みスケジュール</div>
+          <div class="card-body">
+            <div class="alert alert-light border small h-100 overflow-auto">
+              <ul class="mb-0 ps-3">
+                ${appState.schedules.map(s => {
+                   const u = appState.unitList.find(ul => ul.id === s.unitId);
+                   return `<li>${s.date} ${s.startTime}-${s.endTime}<br><strong>${u ? u.title : '不明'}</strong> 第${s.hour}時<br><span class="text-muted">${s.message || ''}</span></li>`;
+                }).join('') || '予定なし'}
+              </ul>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>`;
+}
+
+function setScheduleTime(start, end) {
+  document.getElementById('sc-start').value = start;
+  document.getElementById('sc-end').value = end;
+}
+
+function submitSchedule() {
+  const data = {
+    classId: appState.view.teacherClassId === 'All' ? '1組' : appState.view.teacherClassId, 
+    date: document.getElementById('sc-date').value,
+    startTime: document.getElementById('sc-start').value,
+    endTime: document.getElementById('sc-end').value,
+    unitId: document.getElementById('sc-unit').value,
+    hour: document.getElementById('sc-hour').value,
+    message: document.getElementById('sc-msg').value
+  };
+  
+  if(!data.date || !data.startTime || !data.endTime) return Swal.fire('エラー', '日時を入力してください', 'error');
+  
+  google.script.run.withSuccessHandler(() => {
+    showToast('success', 'スケジュールを配信しました');
+    loadMainData();
+  }).saveClassSchedule(data);
+}
+
+// ==========================================
+//  7. 名簿管理 (Roster)
+// ==========================================
+
+let rosterEditData = []; // 編集中の名簿データ一時保持
+
+function openRosterManagerModal() {
+  Swal.close();
+  
+  // 初期値として現在のクラスのデータをセット
+  const currentClass = appState.view.teacherClassId !== 'All' ? appState.view.teacherClassId : (dataStore.classList[0] || '1組');
+  
+  // モーダル表示
+  Swal.fire({
+    title: '<i class="bi bi-people-fill me-2"></i>名簿管理',
+    html: `
+      <div class="text-start" style="min-height: 500px; display: flex; flex-direction: column;">
+        
+        <!-- 上部ツールバー -->
+        <div class="row g-2 align-items-center mb-3 p-2 bg-light rounded">
+          <div class="col-auto">
+            <label class="form-label small fw-bold mb-0">クラス名</label>
+          </div>
+          <div class="col-auto">
+            <input type="text" id="roster-class" class="form-control form-control-sm text-center fw-bold" 
+                   list="roster-class-list" placeholder="例: 1組" value="${currentClass}" style="width: 100px;">
+            <datalist id="roster-class-list">
+              <option value="1組"><option value="2組"><option value="3組">
+            </datalist>
+          </div>
+          <div class="col">
+            <div class="btn-group btn-group-sm w-100">
+              <button class="btn btn-outline-secondary" onclick="loadRosterFromDB()">
+                <i class="bi bi-arrow-clockwise"></i> 再読込
+              </button>
+              <button class="btn btn-outline-secondary" onclick="document.getElementById('csv-upload').click()">
+                <i class="bi bi-upload"></i> CSV読込
+              </button>
+              <button class="btn btn-outline-secondary" onclick="cleanRosterData()">
+                <i class="bi bi-magic"></i> 整理・ソート
+              </button>
+            </div>
+            <input type="file" id="csv-upload" accept=".csv" style="display:none" onchange="loadRosterFromCSV(this)">
+          </div>
+        </div>
+
+        <!-- メインエリア：左右分割 -->
+        <div class="row flex-grow-1 g-3" style="min-height: 0;">
+          
+          <!-- 左側：貼り付けエリア -->
+          <div class="col-4 d-flex flex-column">
+            <label class="form-label small fw-bold text-muted">
+              <i class="bi bi-clipboard"></i> Excel/スプレッドシートから貼り付け
+            </label>
+            <textarea id="paste-area" class="form-control flex-grow-1 small" 
+                      placeholder="ここにExcelやスプレッドシートのデータを貼り付けると、自動的に右側の表に取り込まれます。&#13;&#10;&#13;&#10;[番号] [名前] の順だと認識精度が上がります。"
+                      style="resize: none; font-family: monospace; font-size: 0.85rem;"></textarea>
+          </div>
+
+          <!-- 右側：編集グリッド -->
+          <div class="col-8 d-flex flex-column">
+            <div class="table-responsive border rounded bg-white flex-grow-1">
+              <table class="table table-sm table-hover table-bordered mb-0 small" id="roster-table">
+                <thead class="table-light sticky-top">
+                  <tr>
+                    <th style="width: 60px;" class="text-center">No.</th>
+                    <th>氏名</th>
+                    <th style="width: 80px;" class="text-center">在籍</th>
+                    <th style="width: 40px;"></th>
+                  </tr>
+                </thead>
+                <tbody id="roster-tbody">
+                  <!-- JSで生成 -->
+                </tbody>
+              </table>
+            </div>
+            <div class="mt-2 text-end">
+              <button class="btn btn-sm btn-outline-primary" onclick="addRosterRow()">
+                <i class="bi bi-plus-lg"></i> 行を追加
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- 下部アクション -->
+        <div class="mt-3 pt-3 border-top d-flex justify-content-between align-items-center">
+          <span class="small text-muted" id="roster-count">0名</span>
+          <button class="btn btn-success rounded-pill px-4" onclick="submitSaveRoster()">
+            <i class="bi bi-save me-1"></i>保存する
+          </button>
+        </div>
+      </div>
+    `,
+    width: '90%',
+    maxWidth: '1000px',
+    showConfirmButton: false,
+    showCloseButton: true,
+    didOpen: () => {
+      // 初期ロード
+      loadRosterFromDB();
+      
+      // クラス名変更イベント
+      document.getElementById('roster-class').addEventListener('change', loadRosterFromDB);
+      
+      // 貼り付けイベント
+      document.getElementById('paste-area').addEventListener('paste', handlePaste);
+      document.getElementById('paste-area').addEventListener('input', (e) => {
+         // 入力（貼り付け）されたら解析してクリア
+         if(e.target.value.trim()) {
+           parsePastedText(e.target.value);
+           e.target.value = ''; // クリアしてフィードバック
+         }
+      });
+    }
+  });
+}
+
+function loadRosterFromDB() {
+  const classId = document.getElementById('roster-class').value;
+  if (!classId) return;
+
+  // 現在のストアからデータを取得してセット
+  rosterEditData = dataStore.roster
+    .filter(r => r.classId === classId)
+    .sort((a,b) => a.number - b.number)
+    .map(r => ({
+      number: r.number || 999,
+      name: r.name,
+      isActive: r.isActive !== false // undefined or true -> true
+    }));
+  
+  renderRosterTable();
+}
+
+function renderRosterTable() {
+  const tbody = document.getElementById('roster-tbody');
+  tbody.innerHTML = '';
+  
+  rosterEditData.forEach((student, index) => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td><input type="number" class="form-control form-control-sm border-0 p-0 text-center" value="${student.number}" onchange="updateRosterData(${index}, 'number', this.value)"></td>
+      <td><input type="text" class="form-control form-control-sm border-0 p-0 px-1" value="${student.name}" onchange="updateRosterData(${index}, 'name', this.value)"></td>
+      <td class="text-center align-middle">
+        <div class="form-check form-switch d-flex justify-content-center">
+          <input class="form-check-input" type="checkbox" ${student.isActive ? 'checked' : ''} onchange="updateRosterData(${index}, 'isActive', this.checked)" title="${student.isActive?'表示':'非表示(転出)'}">
+        </div>
+      </td>
+      <td class="text-center align-middle">
+        <i class="bi bi-x text-danger cursor-pointer" onclick="removeRosterRow(${index})"></i>
+      </td>
+    `;
+    // 非表示(転出)の場合は行をグレーアウト
+    if (!student.isActive) {
+        tr.style.backgroundColor = '#f8f9fa';
+        tr.style.color = '#adb5bd';
+        tr.querySelectorAll('input[type="text"], input[type="number"]').forEach(el => el.style.color = '#adb5bd');
+    }
+    tbody.appendChild(tr);
+  });
+  
+  document.getElementById('roster-count').textContent = `${rosterEditData.length}名`;
+}
+
+function updateRosterData(index, field, value) {
+  if (field === 'number') rosterEditData[index].number = parseInt(value) || 0;
+  if (field === 'name') rosterEditData[index].name = value;
+  if (field === 'isActive') {
+      rosterEditData[index].isActive = value;
+      renderRosterTable(); // 色更新のため再描画
+  }
+}
+
+function addRosterRow() {
+  const nextNum = rosterEditData.length > 0 ? Math.max(...rosterEditData.map(s=>s.number)) + 1 : 1;
+  rosterEditData.push({ number: nextNum, name: '', isActive: true });
+  renderRosterTable();
+}
+
+function removeRosterRow(index) {
+  rosterEditData.splice(index, 1);
+  renderRosterTable();
+}
+
+function handlePaste(e) {
+  // ペーストイベントでの処理
+  setTimeout(() => {
+    const text = e.target.value;
+    if (text) parsePastedText(text);
+    e.target.value = '';
+  }, 100);
+}
+
+function parsePastedText(text) {
+  // 改行で分割
+  const lines = text.split(/\r\n|\n|\r/).filter(line => line.trim() !== '');
+  if (lines.length === 0) return;
+
+  let addedCount = 0;
+  
+  lines.forEach(line => {
+    // タブまたはカンマで分割
+    const cols = line.split(/\t|,/).map(c => c.trim()).filter(c => c);
+    if(cols.length === 0) return;
+
+    let num = 0;
+    let name = "";
+    
+    // データ解析ロジック
+    // パターン1: [番号] [名前] ...
+    if (cols.length >= 2 && !isNaN(cols[0])) {
+        num = parseInt(cols[0]);
+        name = cols[1];
+    } 
+    // パターン2: [名前] のみ
+    else if (cols.length >= 1) {
+        // 自動採番: 現在の最大値 + 1
+        const maxNum = rosterEditData.length > 0 ? Math.max(...rosterEditData.map(s=>s.number)) : 0;
+        num = maxNum + 1;
+        name = cols[0];
+    }
+    
+    if (name) {
+        // 名前が重複していないか簡易チェック（任意）
+        rosterEditData.push({ number: num, name: name, isActive: true });
+        addedCount++;
+    }
+  });
+  
+  if (addedCount > 0) {
+      showToast('success', `${addedCount}件を取り込みました`);
+      renderRosterTable();
+  }
+}
+
+function loadRosterFromCSV(input) {
+  const file = input.files[0];
+  if (!file) return;
+  
+  const reader = new FileReader();
+  reader.onload = function(e) {
+    const text = e.target.result;
+    parsePastedText(text); // 既存のパース関数を流用
+    input.value = ''; // リセット
+  };
+  // ExcelのCSVはShift_JISが多いので対応
+  reader.readAsText(file, 'Shift_JIS');
+}
+
+function cleanRosterData() {
+  // 1. 名前のスペース整形（全角・半角スペースを統一）
+  // 2. 空行削除
+  // 3. 番号順にソート
+  
+  rosterEditData = rosterEditData.filter(s => s.name && s.name.trim() !== '');
+  rosterEditData.forEach(s => {
+      // 姓と名の間のスペースを半角スペース1つに統一
+      s.name = s.name.replace(/\s+/g, ' ').trim(); 
+  });
+  
+  // 番号順にソート
+  rosterEditData.sort((a, b) => a.number - b.number);
+  
+  renderRosterTable();
+  showToast('info', 'データを整理・ソートしました');
+}
+
+function submitSaveRoster() {
+  const classId = document.getElementById('roster-class').value;
+  if (!classId) { Swal.showValidationMessage('クラス名を入力してください'); return; }
+  
+  if (rosterEditData.length === 0) {
+     if(!confirm('名簿が空ですが、このまま保存しますか？（現在の名簿が消去されます）')) return;
+  }
+
+  showLoading();
+  google.script.run
+    .withSuccessHandler(res => {
+      if (res.success) {
+        google.script.run.withSuccessHandler(d => {
+          updateDataStore(d.json);
+          hideLoading();
+          Swal.close();
+          showToast('success', `${classId}の名簿を更新しました`);
+        }).getData();
+      } else { handleError(res); }
+    })
+    .withFailureHandler(handleError)
+    .saveClassRoster(classId, rosterEditData); // オブジェクト配列を送信
+}
+
+// ==========================================
+//  8. その他詳細モーダル
+// ==========================================
+
+function showStudentTaskDetail(name, tid) {
+  const t = dataStore.masterTasks.find(x => x.taskId === tid);
+  const p = (dataStore.clsProgress[name] && dataStore.clsProgress[name][tid]) || {};
+  Swal.fire({
+    title: `${name} さんの状況`,
+    html: `<div class="text-start"><h6 class="fw-bold text-primary">${t.title}</h6><div class="mb-3"><span class="badge bg-secondary me-1">状態: ${p.status||'未'}</span></div><div class="p-3 bg-light rounded mb-3 small">${p.reflection||'メモなし'}</div><hr><div class="d-flex justify-content-center gap-2"><button class="btn btn-outline-primary rounded-circle p-2" style="width:50px;height:50px;font-size:1.5rem" onclick="sendStamp('${name}','${tid}','check')">✅</button><button class="btn btn-outline-primary rounded-circle p-2" style="width:50px;height:50px;font-size:1.5rem" onclick="sendStamp('${name}','${tid}','good')">👍</button><button class="btn btn-outline-primary rounded-circle p-2" style="width:50px;height:50px;font-size:1.5rem" onclick="sendStamp('${name}','${tid}','great')">💮</button><button class="btn btn-outline-primary rounded-circle p-2" style="width:50px;height:50px;font-size:1.5rem" onclick="sendStamp('${name}','${tid}','support')">🚩</button></div></div>`,
+    showConfirmButton: false,
+    showCloseButton: true
+  });
+}
+
+function sendStamp(name, tid, stamp) {
+  if (!dataStore.clsFeedback[name]) dataStore.clsFeedback[name] = {};
+  dataStore.clsFeedback[name][tid] = stamp;
+  renderTeacherDashboardContent(); // 更新
+  showToast('success', 'スタンプ送信');
+  google.script.run.sendFeedback(name, tid, stamp, appState.view.teacherClassId !== 'All' ? appState.view.teacherClassId : '');
+}
+
+/**
+ * [モーダル] タスク詳細表示（先生用・リンク対応）
+ */
+function showTeacherTaskDetailSimple(tid) {
+  const t = dataStore.masterTasks.find(x => x.taskId === tid);
+  if (!t) return;
+
+  const parseMat = (str) => { try { return JSON.parse(str||'{}'); } catch(e){ return {name:str,url:''}; } };
+  const materials = [
+    { type: 'textbook', label: '教科書・資料', icon: 'bi-book', data: parseMat(t.textbook) },
+    { type: 'tablet', label: 'タブレット・アプリ', icon: 'bi-tablet', data: parseMat(t.tablet) },
+    { type: 'print', label: 'プリント・その他', icon: 'bi-file-earmark-text', data: parseMat(t.print) }
+  ];
+
+  let materialHtml = '';
+  materials.forEach(m => {
+    if (m.data.name) {
+      if (m.data.url) {
+        materialHtml += `<a href="${m.data.url}" target="_blank" class="btn btn-outline-primary btn-sm w-100 mb-2 text-start text-truncate"><i class="bi ${m.icon} me-2"></i>${m.data.name}</a>`;
+      } else {
+        materialHtml += `<div class="mb-2 text-truncate"><span class="badge bg-light text-dark border me-2"><i class="bi ${m.icon}"></i> ${m.label}</span><span class="small">${m.data.name}</span></div>`;
+      }
+    }
+  });
+
+  Swal.fire({
+    title: t.title,
+    html: `
+      <div class="text-start">
+        <p class="text-muted border p-3 rounded bg-light mb-3">${t.desc || '説明なし'}</p>
+        ${materialHtml ? '<div class="mb-3 border-top pt-2"><div class="small fw-bold text-muted mb-2">学習リソース</div>' + materialHtml + '</div>' : ''}
+        <div class="text-end small text-muted">時間: ${t.time}分</div>
+      </div>`,
+    showConfirmButton: false,
+    showCloseButton: true
+  });
+}
+</script>
