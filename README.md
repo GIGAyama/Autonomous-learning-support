@@ -75,4 +75,10 @@
 
 * **Direct DB Write**: 先生が作成した単元計画を、相手先のスプレッドシートに直接書き込んで連携します。  
 * **Launcher**: タスクカードからパラメータ付きURLで外部アプリを起動します。  
-* **Status Sync**: 外部アプリからのSOS通知等をWebhook (
+* **Status Sync**: 外部アプリからのSOS通知等をWebhook (doPost) で受信します。
+
+## **📝 ライセンス**
+
+This project is licensed under the MIT [License](https://www.google.com/search?q=LICENSE) - see the LICENSE file for details.
+
+© 2026 みらいコンパス Project
